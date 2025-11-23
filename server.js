@@ -1,124 +1,127 @@
+// server.js
 import express from "express";
 import cors from "cors";
 import { MongoClient, ServerApiVersion } from "mongodb";
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+const port = process.env.PORT || 3000;
 
-// ----- Config from environment variables -----
+// Env vars from Render
 const uri = process.env.MONGODB_URI;
 const dbName = process.env.MONGODB_DB_NAME;
 const collectionName = process.env.MONGODB_COLLECTION_FOODS;
-const port = process.env.PORT || 3000;
 
 if (!uri || !dbName || !collectionName) {
   console.error("Missing MongoDB env vars");
   process.exit(1);
 }
 
-// ----- Mongo client + helper -----
+// --- Mongo client setup (connect once, then reuse) ---
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
     strict: true,
-    deprecationErrors: true
-  }
+    deprecationErrors: true,
+  },
 });
 
 let collection;
 
-async function getCollection() {
-  if (collection) return collection;
+async function initMongo() {
   await client.connect();
   const db = client.db(dbName);
   collection = db.collection(collectionName);
-
-  // helpful indexes
-  await collection.createIndex({ type: 1, barcode: 1 });
-  await collection.createIndex({ type: 1, name: 1 });
-  return collection;
+  console.log("Connected to MongoDB, collection:", collectionName);
 }
 
-// ----- Routes -----
+// --- Express middleware ---
+app.use(cors());
+app.use(express.json());
 
 // Health check
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "LogicSoul API" });
 });
 
-// Upsert a food item (product or ingredient)
-app.post("/food-items", async (req, res) => {
+// POST /foods  → insert a product or ingredient
+// Body should be your FoodItem object, including type: "product" | "ingredient"
+app.post("/foods", async (req, res) => {
   try {
+    if (!collection) return res.status(500).json({ error: "DB not ready" });
+
     const doc = req.body;
-    if (!doc || !doc.type) {
-      return res.status(400).json({ error: "Missing 'type' in body" });
+
+    if (!doc || typeof doc !== "object") {
+      return res.status(400).json({ error: "Invalid JSON body" });
     }
 
-    const col = await getCollection();
-
-    let filter;
-
-    if (doc.type === "product" && doc.barcode) {
-      filter = { type: "product", barcode: doc.barcode };
-    } else if (doc.type === "ingredient" && doc.name) {
-      filter = { type: "ingredient", name: doc.name };
-    } else {
-      return res
-        .status(400)
-        .json({ error: "Need barcode for products or name for ingredients" });
+    // Minimal sanity check
+    if (!doc.type || !["product", "ingredient"].includes(doc.type)) {
+      return res.status(400).json({ error: "Missing or invalid 'type'" });
     }
 
-    const result = await col.findOneAndUpdate(
-      filter,
-      { $set: doc },
-      { upsert: true, returnDocument: "after" }
-    );
-
-    const id = result.value?._id || result.lastErrorObject?.upserted || null;
-
-    res.json({ ok: true, id });
+    const result = await collection.insertOne(doc);
+    res.status(201).json({ insertedId: result.insertedId });
   } catch (err) {
-    console.error("POST /food-items error:", err);
-    res.status(500).json({ error: "Server error", details: err.message });
+    console.error("Error inserting food:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// Get product by barcode
-app.get("/food-items/barcode/:barcode", async (req, res) => {
+// GET /foods/barcode/:barcode  → fetch a product by barcode
+app.get("/foods/barcode/:barcode", async (req, res) => {
   try {
-    const col = await getCollection();
-    const item = await col.findOne({
-      type: "product",
-      barcode: req.params.barcode
-    });
+    if (!collection) return res.status(500).json({ error: "DB not ready" });
 
-    if (!item) return res.status(404).json({ error: "Not found" });
-    res.json(item);
+    const barcode = req.params.barcode;
+    const doc = await collection.findOne({ type: "product", barcode });
+
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
+    res.json(doc);
   } catch (err) {
-    console.error("GET /food-items/barcode error:", err);
-    res.status(500).json({ error: "Server error", details: err.message });
+    console.error("Error fetching by barcode:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// Get ingredient by name
-app.get("/food-items/ingredient/:name", async (req, res) => {
+// GET /foods/ingredient/:name  → fetch ingredient definition by name
+app.get("/foods/ingredient/:name", async (req, res) => {
   try {
-    const col = await getCollection();
-    const item = await col.findOne({
+    if (!collection) return res.status(500).json({ error: "DB not ready" });
+
+    const name = req.params.name;
+    const doc = await collection.findOne({
       type: "ingredient",
-      name: req.params.name
+      name: new RegExp(`^${name}$`, "i"), // case-insensitive
     });
 
-    if (!item) return res.status(404).json({ error: "Not found" });
-    res.json(item);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
+    res.json(doc);
   } catch (err) {
-    console.error("GET /food-items/ingredient error:", err);
-    res.status(500).json({ error: "Server error", details: err.message });
+    console.error("Error fetching ingredient:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// ----- Start server -----
-app.listen(port, () => {
-  console.log(`LogicSoul API listening on port ${port}`);
+// Start server only after Mongo is ready
+initMongo()
+  .then(() => {
+    app.listen(port, () => {
+      console.log(`LogicSoul API listening on port ${port}`);
+    });
+  })
+  .catch((err) => {
+    console.error("Failed to init MongoDB:", err);
+    process.exit(1);
+  });
+
+// Handle clean shutdown (Render will send SIGTERM)
+process.on("SIGTERM", async () => {
+  try {
+    await client.close();
+  } finally {
+    process.exit(0);
+  }
 });
