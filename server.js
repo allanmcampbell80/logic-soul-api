@@ -85,22 +85,34 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
   }
 });
 
-// GET /foods/ingredient/:name  → fetch ingredient definition by name
-app.get("/foods/ingredient/:name", async (req, res) => {
+// GET /foods/barcode/:barcode  → fetch branded product by UPC/EAN
+app.get("/foods/barcode/:barcode", async (req, res) => {
   try {
     if (!collection) return res.status(500).json({ error: "DB not ready" });
 
-    const name = req.params.name;
+    const raw = req.params.barcode;
+    const cleaned = raw.replace(/\D/g, ""); // digits only
+    console.log("[API] Requested barcode:", raw, " cleaned:", cleaned);
+
+    // DB UPCs are usually stored with spaces. We normalize that too.
+    const cleanedRegex = new RegExp(`^${cleaned}$`);
+
     const doc = await collection.findOne({
-      type: "ingredient",
-      name: new RegExp(`^${name}$`, "i"), // case-insensitive
+      $or: [
+        { "source.usda_gtin_upc": cleanedRegex },
+        { "source.usda_gtin_upc": cleaned },   // backup: exact match as string
+        { "brand.gtin_upc": cleanedRegex },
+        { "brand.gtin_upc": cleaned }
+      ],
     });
+
+    console.log("[API] DB search result:", doc ? "FOUND" : "NOT FOUND");
 
     if (!doc) return res.status(404).json({ error: "Not found" });
 
     res.json(doc);
   } catch (err) {
-    console.error("Error fetching ingredient:", err);
+    console.error("Error fetching by barcode:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
