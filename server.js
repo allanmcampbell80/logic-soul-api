@@ -68,23 +68,6 @@ app.post("/foods", async (req, res) => {
   }
 });
 
-// GET /foods/barcode/:barcode  → fetch a product by barcode
-app.get("/foods/barcode/:barcode", async (req, res) => {
-  try {
-    if (!collection) return res.status(500).json({ error: "DB not ready" });
-
-    const barcode = req.params.barcode;
-    const doc = await collection.findOne({ type: "product", barcode });
-
-    if (!doc) return res.status(404).json({ error: "Not found" });
-
-    res.json(doc);
-  } catch (err) {
-    console.error("Error fetching by barcode:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
 // GET /foods/barcode/:barcode  → fetch branded product by UPC/EAN
 app.get("/foods/barcode/:barcode", async (req, res) => {
   try {
