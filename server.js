@@ -74,26 +74,31 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
     if (!collection) return res.status(500).json({ error: "DB not ready" });
 
     const raw = req.params.barcode;
-    const cleaned = raw.replace(/\D/g, ""); // digits only
-    console.log("[API] Requested barcode:", raw, " cleaned:", cleaned);
+    const cleaned = raw.replace(/\D/g, ""); // strip spaces, hyphens, etc.
 
-    // DB UPCs are usually stored with spaces. We normalize that too.
-    const cleanedRegex = new RegExp(`^${cleaned}$`);
+    if (!cleaned) {
+      return res.status(400).json({ error: "Invalid barcode" });
+    }
 
-    const doc = await collection.findOne({
-      $or: [
-        { "source.usda_gtin_upc": cleanedRegex },
-        { "source.usda_gtin_upc": cleaned },   // backup: exact match as string
-        { "brand.gtin_upc": cleanedRegex },
-        { "brand.gtin_upc": cleaned }
-      ],
-    });
+    // Normalize just like enrichment script
+    const normalized = cleaned.padStart(14, "0").replace(/^00/, "");
 
-    console.log("[API] DB search result:", doc ? "FOUND" : "NOT FOUND");
+    console.log("[API] Raw:", raw, "Clean:", cleaned, "Normalized:", normalized);
 
-    if (!doc) return res.status(404).json({ error: "Not found" });
+    // Search ONLY the normalized_upc
+    const doc = await collection.findOne({ normalized_upc: normalized });
+
+    console.log("[API] Lookup result:", doc ? "FOUND" : "NOT FOUND");
+
+    if (!doc) {
+      return res.status(404).json({ 
+        error: "Not found", 
+        normalized_upc: normalized 
+      });
+    }
 
     res.json(doc);
+
   } catch (err) {
     console.error("Error fetching by barcode:", err);
     res.status(500).json({ error: "Internal server error" });
