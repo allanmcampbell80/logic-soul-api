@@ -80,10 +80,10 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
       return res.status(400).json({ error: "Invalid barcode" });
     }
 
-    // Normalize just like enrichment script
-    const normalized = cleaned.padStart(14, "0").replace(/^00/, "");
+    // Normalize to a 16-digit numeric string to match normalized_upc in Mongo
+    const normalized = cleaned.padStart(16, "0");
 
-    console.log("[API] Raw:", raw, "Clean:", cleaned, "Normalized:", normalized);
+    console.log("[API] Raw:", raw, "Clean:", cleaned, "Normalized16:", normalized);
 
     // Search ONLY the normalized_upc
     const doc = await collection.findOne({ normalized_upc: normalized });
