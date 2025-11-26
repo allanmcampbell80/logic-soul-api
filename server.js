@@ -20,7 +20,8 @@ if (!uri || !dbName || !collectionName) {
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
-    strict: true,
+    // Turn off apiStrict so we can safely use $meta: "textScore" in queries
+    strict: false,
     deprecationErrors: true,
   },
 });
