@@ -121,31 +121,33 @@ app.post("/foods/usda-candidates", async (req, res) => {
 
     const { name, brandName, limit } = req.body || {};
 
-    if (!name && !brandName) {
-      return res.status(400).json({
-        error: "Please provide at least a product name or brandName.",
-      });
-    }
+    console.log("[USDA Candidates] Incoming body:", req.body);
 
     // Build a text search string from whatever we have
     const searchParts = [];
-    if (brandName && typeof brandName === "string" && brandName.trim().length > 0) {
+    if (typeof brandName === "string" && brandName.trim().length > 0) {
       searchParts.push(`"${brandName.trim()}"`);
     }
-    if (name && typeof name === "string" && name.trim().length > 0) {
+    if (typeof name === "string" && name.trim().length > 0) {
       searchParts.push(name.trim());
     }
     const searchString = searchParts.join(" ");
 
+    console.log("[USDA Candidates] searchString:", JSON.stringify(searchString));
+
+    // If we ended up with nothing meaningful to search, bail with 400
+    if (!searchString || searchString.trim().length === 0) {
+      return res.status(400).json({
+        error:
+          "Please provide a non-empty product name or brandName to search USDA candidates.",
+      });
+    }
+
     // Base query: USDA branded products only
     const query = {
       "source.usda_data_type": "Branded",
+      $text: { $search: searchString },
     };
-
-    // If we have a search string, use the text index
-    if (searchString.length > 0) {
-      query.$text = { $search: searchString };
-    }
 
     // Projection: include a textScore so we can sort by relevance
     const projection = {
@@ -168,11 +170,19 @@ app.post("/foods/usda-candidates", async (req, res) => {
 
     const results = await cursor.toArray();
 
+    console.log(
+      "[USDA Candidates] Found",
+      results.length,
+      "docs for searchString:",
+      searchString
+    );
+
     const simplified = results.map((doc) => ({
       id: doc._id,
       name: doc.name,
       normalizedName: doc.normalized_name,
       normalizedUPC: doc.normalized_upc,
+      normalizedUPC16: doc.normalized_upc, // same for now
       brandName: doc.brand?.name ?? null,
       brandOwner: doc.brand?.owner ?? null,
       marketCountry: doc.brand?.market_country ?? null,
@@ -191,6 +201,7 @@ app.post("/foods/usda-candidates", async (req, res) => {
     console.error("[USDA Candidates] Error:", err);
     res.status(500).json({
       error: "Internal server error finding USDA candidates.",
+      details: String(err && err.message ? err.message : err),
     });
   }
 });
