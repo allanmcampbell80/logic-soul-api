@@ -86,7 +86,13 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
     console.log("[API] Raw:", raw, "Clean:", cleaned, "Normalized16:", normalized);
 
     // Search ONLY the normalized_upc
-    const doc = await collection.findOne({ normalized_upc: normalized });
+    // Search both normalized_upc (USDA) and normalized_upc_16 (Canada OFF)
+    const doc = await collection.findOne({
+    $or: [
+    { normalized_upc: normalized },
+    { normalized_upc_16: normalized }
+        ]
+    });
 
     console.log("[API] Lookup result:", doc ? "FOUND" : "NOT FOUND");
 
