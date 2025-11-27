@@ -131,6 +131,70 @@ app.post("/foods/user-enriched", async (req, res) => {
   }
 });
 
+// POST /user-enriched-food-item  → alias for iOS client endpoint
+app.post("/user-enriched-food-item", async (req, res) => {
+  try {
+    if (!collection) {
+      return res.status(500).json({ error: "DB not ready" });
+    }
+
+    const body = req.body;
+    if (!body || typeof body !== "object") {
+      return res.status(400).json({ error: "Invalid JSON body" });
+    }
+
+    // Extract barcode from body or header
+    const headerBarcode = req.header("X-Barcode") || req.header("x-barcode");
+    const rawBarcode =
+      (typeof body.barcode === "string" && body.barcode) || headerBarcode || "";
+
+    const cleanedBarcode = rawBarcode.replace(/\D/g, "");
+    const normalizedUPC16 = cleanedBarcode ? cleanedBarcode.padStart(16, "0") : null;
+
+    // Prepare source block: preserve what GPT gave, then annotate as user submission
+    const incomingSource =
+      body.source && typeof body.source === "object" ? body.source : {};
+
+    const originHeader = req.header("X-Origin") || req.header("x-origin");
+
+    const source = {
+      ...incomingSource,
+      type: incomingSource.type || "gpt_ocr_label",
+      created_via: incomingSource.created_via || "barcode_ocr_ios_user_photo",
+      user_submitted: true,
+      origin: originHeader || "ios_user_barcode_ocr",
+      submitted_at: new Date(),
+    };
+
+    const now = new Date();
+
+    const docToInsert = {
+      ...body,
+      type: body.type || "product",
+      source,
+      normalized_upc: normalizedUPC16 || body.normalized_upc || null,
+      normalized_upc_16: normalizedUPC16 || body.normalized_upc_16 || null,
+      original_barcode_raw: rawBarcode || null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const result = await collection.insertOne(docToInsert);
+
+    res.status(201).json({
+      ok: true,
+      insertedId: result.insertedId,
+      normalized_upc: docToInsert.normalized_upc,
+      normalized_upc_16: docToInsert.normalized_upc_16,
+    });
+  } catch (err) {
+    console.error("[User-Enriched Alias] Error inserting GPT-enriched product:", err);
+    res
+      .status(500)
+      .json({ error: "Internal server error inserting user-enriched product (alias)." });
+  }
+});
+
 // GET /foods/barcode/:barcode  → fetch branded product by UPC/EAN
 app.get("/foods/barcode/:barcode", async (req, res) => {
   try {
