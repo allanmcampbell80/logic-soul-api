@@ -355,10 +355,24 @@ app.post("/foods/usda-candidates", async (req, res) => {
 
       const fallbackClauses = [];
 
-      // If we have a brand name, try to match it loosely on brand.name
+      // If we have a brand name, try to match it loosely on brand.name and brand.owner
       if (typeof brandName === "string" && brandName.trim().length > 0) {
-        const brandRegex = new RegExp(brandName.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+        const rawBrand = brandName.trim();
+        // Normalize common brand variations like "Campbell's" vs "Campbells" → "campbell"
+        const brandCore = rawBrand
+          .replace(/[’']/g, "") // drop apostrophes
+          .replace(/s$/i, "") // drop a trailing s
+          .trim();
+
+        const brandPattern = brandCore.length > 0 ? brandCore : rawBrand;
+        const brandRegex = new RegExp(
+          brandPattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+          "i"
+        );
+
+        // Try matching both the display brand name and brand owner
         fallbackClauses.push({ "brand.name": brandRegex });
+        fallbackClauses.push({ "brand.owner": brandRegex });
       }
 
       // If we have a product name, split it into tokens and try to match any
