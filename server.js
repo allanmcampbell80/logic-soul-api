@@ -35,6 +35,64 @@ async function initMongo() {
   console.log("Connected to MongoDB, collection:", collectionName);
 }
 
+// Helper function to build user enriched doc
+function buildUserEnrichedDoc(payload, headers) {
+  const { rawGPTData, userSubmission } = payload || {};
+
+  if (!rawGPTData || typeof rawGPTData !== "object") {
+    throw new Error("Missing or invalid 'rawGPTData' in request body");
+  }
+
+  const rawBarcode =
+    (typeof rawGPTData.barcode === "string" && rawGPTData.barcode) ||
+    headers["x-barcode"] ||
+    headers["X-Barcode"] ||
+    "";
+
+  const cleanedBarcode = rawBarcode.replace(/\D/g, "");
+  const normalizedUPC16 = cleanedBarcode ? cleanedBarcode.padStart(16, "0") : null;
+
+  const incomingSource =
+    rawGPTData.source && typeof rawGPTData.source === "object" ? rawGPTData.source : {};
+
+  const originHeader = headers["x-origin"] || headers["X-Origin"];
+
+  const source = {
+    ...incomingSource,
+    type: incomingSource.type || "gpt_ocr_label",
+    created_via: incomingSource.created_via || "barcode_ocr_ios_user_photo",
+    user_submitted: true,
+    origin:
+      (userSubmission && userSubmission.sourceType) ||
+      originHeader ||
+      "ios_user_barcode_ocr",
+    submitted_at:
+      userSubmission && userSubmission.submittedAt
+        ? new Date(userSubmission.submittedAt)
+        : new Date(),
+    submitted_by_device:
+      userSubmission && userSubmission.submittedByDevice
+        ? userSubmission.submittedByDevice
+        : undefined,
+    note: userSubmission && userSubmission.note ? userSubmission.note : undefined,
+  };
+
+  const now = new Date();
+
+  const docToInsert = {
+    ...rawGPTData,
+    type: rawGPTData.type || "product",
+    source,
+    normalized_upc: normalizedUPC16 || rawGPTData.normalized_upc || null,
+    normalized_upc_16: normalizedUPC16 || rawGPTData.normalized_upc_16 || null,
+    original_barcode_raw: rawBarcode || rawGPTData.original_barcode_raw || null,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  return docToInsert;
+}
+
 // --- Express middleware ---
 app.use(cors());
 app.use(express.json());
@@ -81,41 +139,18 @@ app.post("/foods/user-enriched", async (req, res) => {
       return res.status(400).json({ error: "Invalid JSON body" });
     }
 
-    // Extract barcode from body or header
-    const headerBarcode = req.header("X-Barcode") || req.header("x-barcode");
-    const rawBarcode =
-      (typeof body.barcode === "string" && body.barcode) || headerBarcode || "";
-
-    const cleanedBarcode = rawBarcode.replace(/\D/g, "");
-    const normalizedUPC16 = cleanedBarcode ? cleanedBarcode.padStart(16, "0") : null;
-
-    // Prepare source block: preserve what GPT gave, then annotate as user submission
-    const incomingSource =
-      body.source && typeof body.source === "object" ? body.source : {};
-
-    const originHeader = req.header("X-Origin") || req.header("x-origin");
-
-    const source = {
-      ...incomingSource,
-      type: incomingSource.type || "gpt_ocr_label",
-      created_via: incomingSource.created_via || "barcode_ocr_ios_user_photo",
-      user_submitted: true,
-      origin: originHeader || "ios_user_barcode_ocr",
-      submitted_at: new Date(),
-    };
-
-    const now = new Date();
-
-    const docToInsert = {
-      ...body,
-      type: body.type || "product",
-      source,
-      normalized_upc: normalizedUPC16 || body.normalized_upc || null,
-      normalized_upc_16: normalizedUPC16 || body.normalized_upc_16 || null,
-      original_barcode_raw: rawBarcode || null,
-      createdAt: now,
-      updatedAt: now,
-    };
+    let docToInsert;
+    try {
+      docToInsert = buildUserEnrichedDoc(body, req.headers);
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        err.message.startsWith("Missing or invalid 'rawGPTData'")
+      ) {
+        return res.status(400).json({ error: err.message });
+      }
+      throw err;
+    }
 
     const result = await collection.insertOne(docToInsert);
 
@@ -143,41 +178,18 @@ app.post("/user-enriched-food-item", async (req, res) => {
       return res.status(400).json({ error: "Invalid JSON body" });
     }
 
-    // Extract barcode from body or header
-    const headerBarcode = req.header("X-Barcode") || req.header("x-barcode");
-    const rawBarcode =
-      (typeof body.barcode === "string" && body.barcode) || headerBarcode || "";
-
-    const cleanedBarcode = rawBarcode.replace(/\D/g, "");
-    const normalizedUPC16 = cleanedBarcode ? cleanedBarcode.padStart(16, "0") : null;
-
-    // Prepare source block: preserve what GPT gave, then annotate as user submission
-    const incomingSource =
-      body.source && typeof body.source === "object" ? body.source : {};
-
-    const originHeader = req.header("X-Origin") || req.header("x-origin");
-
-    const source = {
-      ...incomingSource,
-      type: incomingSource.type || "gpt_ocr_label",
-      created_via: incomingSource.created_via || "barcode_ocr_ios_user_photo",
-      user_submitted: true,
-      origin: originHeader || "ios_user_barcode_ocr",
-      submitted_at: new Date(),
-    };
-
-    const now = new Date();
-
-    const docToInsert = {
-      ...body,
-      type: body.type || "product",
-      source,
-      normalized_upc: normalizedUPC16 || body.normalized_upc || null,
-      normalized_upc_16: normalizedUPC16 || body.normalized_upc_16 || null,
-      original_barcode_raw: rawBarcode || null,
-      createdAt: now,
-      updatedAt: now,
-    };
+    let docToInsert;
+    try {
+      docToInsert = buildUserEnrichedDoc(body, req.headers);
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        err.message.startsWith("Missing or invalid 'rawGPTData'")
+      ) {
+        return res.status(400).json({ error: err.message });
+      }
+      throw err;
+    }
 
     const result = await collection.insertOne(docToInsert);
 
