@@ -347,18 +347,6 @@ function computeUSDACombinedScore(doc, options) {
   const overlap = qTokens.filter((t) => docNameTokens.includes(t)).length;
   score += overlap * 2;
 
-  // Extra bias for strong matches on key food words
-  const hasTomato = docNameTokens.includes("tomato");
-  const hasSoup = docNameTokens.includes("soup");
-  const hasCondensed = docNameTokens.includes("condensed");
-  const qHasTomato = qTokens.includes("tomato");
-  const qHasSoup = qTokens.includes("soup");
-  const qHasCondensed = qTokens.includes("condensed");
-
-  if (qHasSoup && hasSoup) score += 5;
-  if (qHasTomato && hasTomato) score += 3;
-  if (qHasCondensed && hasCondensed) score += 3;
-
   doc._combinedScore = score;
   return score;
 }
@@ -448,65 +436,99 @@ app.post("/foods/usda-candidates", async (req, res) => {
     if (shouldRunFallback) {
       console.log("[USDA Candidates] Using intelligent fallback to help find brand/food match…");
 
-      const fallbackClauses = [];
+      // Escape helper for building safe regex patterns
+      const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-      // Use shared tokenizer so we keep food-meaningful tokens like "soup", "tomato", etc.
+      // Keep brand and name tokens in their own "zones"
       const brandTokens =
         typeof brandName === "string" && brandName.trim().length > 0
           ? tokenizeName(brandName)
           : [];
+
       const nameTokens =
         typeof name === "string" && name.trim().length > 0
           ? tokenizeName(name)
           : [];
 
-      const allTokens = [...brandTokens, ...nameTokens];
-      const uniqueTokens = Array.from(new Set(allTokens));
+      const uniqueBrandTokens = Array.from(new Set(brandTokens));
+      const uniqueNameTokens = Array.from(new Set(nameTokens));
 
-      for (const token of uniqueTokens) {
-        const safe = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const tokenRegex = new RegExp(safe, "i");
-        fallbackClauses.push({ "brand.name": tokenRegex });
-        fallbackClauses.push({ "brand.owner": tokenRegex });
-        fallbackClauses.push({ name: tokenRegex });
-        fallbackClauses.push({ normalized_name: tokenRegex });
+      // Brand-zone clauses → brand.name / brand.owner
+      const brandRegexClauses = [];
+      for (const token of uniqueBrandTokens) {
+        const r = new RegExp(escapeRegex(token), "i");
+        brandRegexClauses.push({ "brand.name": r });
+        brandRegexClauses.push({ "brand.owner": r });
       }
 
-      if (fallbackClauses.length > 0) {
-        const fallbackQuery = {
+      // Name-zone clauses → name / normalized_name
+      const nameRegexClauses = [];
+      for (const token of uniqueNameTokens) {
+        const r = new RegExp(escapeRegex(token), "i");
+        nameRegexClauses.push({ name: r });
+        nameRegexClauses.push({ normalized_name: r });
+      }
+
+      let fallbackQuery;
+
+      if (brandRegexClauses.length > 0 && nameRegexClauses.length > 0) {
+        // We know both a brand and a product name:
+        //  - brand tokens must match brand fields
+        //  - name tokens must match name fields
+        fallbackQuery = {
           "source.usda_data_type": "Branded",
-          $or: fallbackClauses,
+          $and: [
+            { $or: brandRegexClauses },
+            { $or: nameRegexClauses },
+          ],
         };
-
-        const fallbackCursor = collection
-          .find(fallbackQuery, { projection: { ...projection, score: undefined } })
-          .limit(mongoFetchLimit);
-
-        const fallbackResults = await fallbackCursor.toArray();
-
-        // Merge primary text results with fallback, de-duplicate by _id,
-        // then re-score and sort everything together.
-        const mergedById = new Map();
-
-        (results || []).forEach((doc) => {
-          mergedById.set(String(doc._id), doc);
-        });
-
-        fallbackResults.forEach((doc) => {
-          const key = String(doc._id);
-          if (!mergedById.has(key)) {
-            mergedById.set(key, doc);
-          }
-        });
-
-        const merged = Array.from(mergedById.values());
-        merged.forEach((doc) => {
-          computeUSDACombinedScore(doc, { name, brandName });
-        });
-        merged.sort((a, b) => (b._combinedScore || 0) - (a._combinedScore || 0));
-
-        results = merged;
+      } else if (brandRegexClauses.length > 0) {
+        // Only brand is useful (e.g., "Campbells")
+        fallbackQuery = {
+          "source.usda_data_type": "Branded",
+          $or: brandRegexClauses,
+        };
+      } else if (nameRegexClauses.length > 0) {
+        // Only name is useful (no brand provided)
+        fallbackQuery = {
+          "source.usda_data_type": "Branded",
+          $or: nameRegexClauses,
+        };
+      } else {
+        // Nothing meaningful to search on; extremely rare, but be safe.
+        fallbackQuery = {
+          "source.usda_data_type": "Branded",
+        };
       }
+
+      const fallbackCursor = collection
+        .find(fallbackQuery, { projection: { ...projection, score: undefined } })
+        .limit(mongoFetchLimit);
+
+      const fallbackResults = await fallbackCursor.toArray();
+
+      // Merge primary $text results with fallback, de-duplicate by _id,
+      // then recompute combined scores and re-sort.
+      const mergedById = new Map();
+
+      (results || []).forEach((doc) => {
+        mergedById.set(String(doc._id), doc);
+      });
+
+      fallbackResults.forEach((doc) => {
+        const key = String(doc._id);
+        if (!mergedById.has(key)) {
+          mergedById.set(key, doc);
+        }
+      });
+
+      const merged = Array.from(mergedById.values());
+      merged.forEach((doc) => {
+        computeUSDACombinedScore(doc, { name, brandName });
+      });
+      merged.sort((a, b) => (b._combinedScore || 0) - (a._combinedScore || 0));
+
+      results = merged;
     }
 
     // Finally trim down to the requested limit
