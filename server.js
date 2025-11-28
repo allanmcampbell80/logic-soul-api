@@ -346,12 +346,56 @@ app.post("/foods/usda-candidates", async (req, res) => {
       .sort({ score: { $meta: "textScore" } })
       .limit(maxResults);
 
-    const results = await cursor.toArray();
+    let results = await cursor.toArray();
+
+    // If the strict $text search didn't return anything, fall back to a more
+    // forgiving search that allows partial matches on brand + name tokens.
+    if (!results || results.length === 0) {
+      console.log("[USDA Candidates] No results from $text search, using forgiving fallback…");
+
+      const fallbackClauses = [];
+
+      // If we have a brand name, try to match it loosely on brand.name
+      if (typeof brandName === "string" && brandName.trim().length > 0) {
+        const brandRegex = new RegExp(brandName.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+        fallbackClauses.push({ "brand.name": brandRegex });
+      }
+
+      // If we have a product name, split it into tokens and try to match any
+      // of the meaningful tokens against name/normalized_name.
+      if (typeof name === "string" && name.trim().length > 0) {
+        const tokens = name
+          .split(/\s+/)
+          .map((t) => t.trim())
+          .filter((t) => t.length >= 3); // drop tiny words like "of", "a", etc.
+
+        for (const token of tokens) {
+          const tokenRegex = new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+          fallbackClauses.push({ name: tokenRegex });
+          fallbackClauses.push({ normalized_name: tokenRegex });
+        }
+      }
+
+      if (fallbackClauses.length > 0) {
+        const fallbackQuery = {
+          "source.usda_data_type": "Branded",
+          $or: fallbackClauses,
+        };
+
+        const fallbackCursor = collection
+          .find(fallbackQuery, { projection: { ...projection, score: undefined } })
+          .limit(maxResults);
+
+        results = await fallbackCursor.toArray();
+      } else {
+        results = [];
+      }
+    }
 
     console.log(
       "[USDA Candidates] Found",
       results.length,
-      "docs for searchString:",
+      "docs for searchString (after fallback if any):",
       searchString
     );
 
