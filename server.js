@@ -405,11 +405,20 @@ app.post("/foods/link-canadian-to-usda", async (req, res) => {
       .replace(/\D/g, "")
       .padStart(16, "0");
 
-    // Find the Canadian doc
-    const canadianDoc = await collection.findOne({
-      is_canadian_product: true,
+    // Find the Canadian doc for this UPC.
+    // Prefer a user-submitted product (from barcode+photos) if one exists,
+    // otherwise fall back to the OFF-imported Canadian product.
+    let canadianDoc = await collection.findOne({
       normalized_upc_16: normalizedCanadian,
+      "source.user_submitted": true,
     });
+
+    if (!canadianDoc) {
+      canadianDoc = await collection.findOne({
+        normalized_upc_16: normalizedCanadian,
+        is_canadian_product: true,
+      });
+    }
 
     if (!canadianDoc) {
       return res.status(404).json({
@@ -417,6 +426,8 @@ app.post("/foods/link-canadian-to-usda", async (req, res) => {
         normalizedCanadian,
       });
     }
+
+    console.log("[Link Canadian→USDA] Linking UPC", normalizedCanadian, "to USDA UPC", normalizedUSDA, "using doc _id:", canadianDoc._id);
 
     // Find the USDA branded doc
     const usdaDoc = await collection.findOne({
