@@ -349,47 +349,55 @@ app.post("/foods/usda-candidates", async (req, res) => {
     let results = await cursor.toArray();
 
     // If the strict $text search didn't return anything, fall back to a more
-    // forgiving search that allows partial matches on brand + name tokens.
+    // intelligent token-based matcher that is universal for all brands/products.
     if (!results || results.length === 0) {
-      console.log("[USDA Candidates] No results from $text search, using forgiving fallback…");
+      console.log("[USDA Candidates] No results from $text search, using intelligent fallback…");
 
       const fallbackClauses = [];
 
-      // If we have a brand name, try to match it loosely on brand.name and brand.owner
-      if (typeof brandName === "string" && brandName.trim().length > 0) {
-        const rawBrand = brandName.trim();
-        // Normalize common brand variations like "Campbell's" vs "Campbells" → "campbell"
-        const brandCore = rawBrand
-          .replace(/[’']/g, "") // drop apostrophes
-          .replace(/s$/i, "") // drop a trailing s
-          .trim();
-
-        const brandPattern = brandCore.length > 0 ? brandCore : rawBrand;
-        const brandRegex = new RegExp(
-          brandPattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
-          "i"
-        );
-
-        // Try matching both the display brand name and brand owner
-        fallbackClauses.push({ "brand.name": brandRegex });
-        fallbackClauses.push({ "brand.owner": brandRegex });
-      }
-
-      // If we have a product name, split it into tokens and try to match any
-      // of the meaningful tokens against name/normalized_name.
-      if (typeof name === "string" && name.trim().length > 0) {
-        const tokens = name
+      // Helper: extract meaningful tokens
+      function tokenize(str) {
+        if (!str || typeof str !== "string") return [];
+        return str
+          .toLowerCase()
+          .replace(/[’']/g, "")       // remove apostrophes
+          .replace(/[^a-z0-9\s]/gi, " ") // non-alphanumerics → space
           .split(/\s+/)
-          .map((t) => t.trim())
-          .filter((t) => t.length >= 3); // drop tiny words like "of", "a", etc.
-
-        for (const token of tokens) {
-          const tokenRegex = new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-          fallbackClauses.push({ name: tokenRegex });
-          fallbackClauses.push({ normalized_name: tokenRegex });
-        }
+          .filter((t) => t.length >= 3)  // remove "of", "a", "to", etc.
+          .filter((t) => !["soup","condensed","cream","classic","brand","company","limited","inc","the","and"].includes(t));
       }
 
+      // BRAND TOKEN EXTRACTION
+      let brandTokens = [];
+      if (typeof brandName === "string" && brandName.trim().length > 0) {
+        const cleanedBrand = brandName
+          .toLowerCase()
+          .replace(/[’']/g, "")
+          .replace(/company|co\.?|inc\.?|ltd\.?/gi, "")
+          .trim();
+        brandTokens = tokenize(cleanedBrand);
+      }
+
+      // NAME TOKEN EXTRACTION
+      let nameTokens = [];
+      if (typeof name === "string" && name.trim().length > 0) {
+        nameTokens = tokenize(name);
+      }
+
+      // Build regex clauses for any token
+      const allTokens = [...brandTokens, ...nameTokens];
+      const uniqueTokens = Array.from(new Set(allTokens));
+
+      for (const token of uniqueTokens) {
+        const safe = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const tokenRegex = new RegExp(safe, "i");
+        fallbackClauses.push({ "brand.name": tokenRegex });
+        fallbackClauses.push({ "brand.owner": tokenRegex });
+        fallbackClauses.push({ name: tokenRegex });
+        fallbackClauses.push({ normalized_name: tokenRegex });
+      }
+
+      // Ensure fallbackClauses is applied only if non-empty
       if (fallbackClauses.length > 0) {
         const fallbackQuery = {
           "source.usda_data_type": "Branded",
