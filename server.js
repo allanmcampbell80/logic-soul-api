@@ -289,6 +289,80 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
   }
 });
 
+// --- USDA candidate scoring helpers ---
+
+function normalizeBrand(str) {
+  if (!str || typeof str !== "string") return "";
+  return str
+    .toLowerCase()
+    .replace(/[’']/g, "") // remove apostrophes
+    .replace(/company|companies|co\.?|inc\.?|ltd\.?|llc\.?|corp\.?/gi, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function tokenizeName(str) {
+  if (!str || typeof str !== "string") return [];
+  return str
+    .toLowerCase()
+    .replace(/[’']/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((t) => !["the", "and", "of", "with", "in", "style", "brand"].includes(t));
+}
+
+function fuzzyBrandMatches(docBrand, queryBrand) {
+  const docOwner = (docBrand && docBrand.owner) || "";
+  const docName = (docBrand && docBrand.name) || "";
+  const docNorm = normalizeBrand(docName || docOwner);
+  const qNorm = normalizeBrand(queryBrand);
+  if (!docNorm || !qNorm) return false;
+  if (docNorm === qNorm) return true;
+  return docNorm.includes(qNorm) || qNorm.includes(docNorm);
+}
+
+function computeUSDACombinedScore(doc, options) {
+  const { name, brandName } = options || {};
+  let score = typeof doc.score === "number" ? doc.score : 0;
+
+  const docBrand = doc.brand || {};
+  const docOwner = docBrand.owner || "";
+  const docNameBrand = docBrand.name || "";
+  const docBrandNorm = normalizeBrand(docNameBrand || docOwner);
+  const qBrandNorm = normalizeBrand(brandName);
+
+  // Brand match bonuses
+  if (qBrandNorm && docBrandNorm) {
+    if (docBrandNorm === qBrandNorm) {
+      score += 20;
+    } else if (docBrandNorm.includes(qBrandNorm) || qBrandNorm.includes(docBrandNorm)) {
+      score += 10;
+    }
+  }
+
+  const qTokens = tokenizeName(name);
+  const docNameTokens = tokenizeName(doc.name || doc.normalized_name || "");
+  const overlap = qTokens.filter((t) => docNameTokens.includes(t)).length;
+  score += overlap * 2;
+
+  // Extra bias for strong matches on key food words
+  const hasTomato = docNameTokens.includes("tomato");
+  const hasSoup = docNameTokens.includes("soup");
+  const hasCondensed = docNameTokens.includes("condensed");
+  const qHasTomato = qTokens.includes("tomato");
+  const qHasSoup = qTokens.includes("soup");
+  const qHasCondensed = qTokens.includes("condensed");
+
+  if (qHasSoup && hasSoup) score += 5;
+  if (qHasTomato && hasTomato) score += 3;
+  if (qHasCondensed && hasCondensed) score += 3;
+
+  doc._combinedScore = score;
+  return score;
+}
+
 // POST /foods/usda-candidates
 // Given a product name + brandName, return top USDA-branded candidates.
 app.post("/foods/usda-candidates", async (req, res) => {
@@ -338,53 +412,54 @@ app.post("/foods/usda-candidates", async (req, res) => {
       score: { $meta: "textScore" },
     };
 
-    const maxResults =
+    const finalLimit =
       typeof limit === "number" && limit > 0 && limit <= 25 ? limit : 10;
+
+    // Pull a larger candidate set from Mongo text search so we can re-rank
+    // by brand + name tokens. Then we will trim back to finalLimit.
+    const mongoFetchLimit = Math.min(Math.max(finalLimit * 3, finalLimit + 10), 50);
 
     const cursor = collection
       .find(query, { projection })
       .sort({ score: { $meta: "textScore" } })
-      .limit(maxResults);
+      .limit(mongoFetchLimit);
 
     let results = await cursor.toArray();
 
-    // If the strict $text search didn't return anything, fall back to a more
-    // intelligent token-based matcher that is universal for all brands/products.
-    if (!results || results.length === 0) {
-      console.log("[USDA Candidates] No results from $text search, using intelligent fallback…");
+    // Re-rank initial $text results using combined score
+    if (results && results.length > 0) {
+      results.forEach((doc) => {
+        computeUSDACombinedScore(doc, { name, brandName });
+      });
+      results.sort((a, b) => (b._combinedScore || 0) - (a._combinedScore || 0));
+    }
+
+    // Decide whether we should run a fallback: either no results at all,
+    // or nothing that even loosely matches the requested brand.
+    const hasFuzzyBrandHit =
+      results &&
+      results.length > 0 &&
+      typeof brandName === "string" &&
+      results.some((doc) => fuzzyBrandMatches(doc.brand || {}, brandName));
+
+    const shouldRunFallback =
+      !results || results.length === 0 || (!hasFuzzyBrandHit && typeof brandName === "string");
+
+    if (shouldRunFallback) {
+      console.log("[USDA Candidates] Using intelligent fallback to help find brand/food match…");
 
       const fallbackClauses = [];
 
-      // Helper: extract meaningful tokens
-      function tokenize(str) {
-        if (!str || typeof str !== "string") return [];
-        return str
-          .toLowerCase()
-          .replace(/[’']/g, "")       // remove apostrophes
-          .replace(/[^a-z0-9\s]/gi, " ") // non-alphanumerics → space
-          .split(/\s+/)
-          .filter((t) => t.length >= 3)  // remove "of", "a", "to", etc.
-          .filter((t) => !["soup","condensed","cream","classic","brand","company","limited","inc","the","and"].includes(t));
-      }
+      // Use shared tokenizer so we keep food-meaningful tokens like "soup", "tomato", etc.
+      const brandTokens =
+        typeof brandName === "string" && brandName.trim().length > 0
+          ? tokenizeName(brandName)
+          : [];
+      const nameTokens =
+        typeof name === "string" && name.trim().length > 0
+          ? tokenizeName(name)
+          : [];
 
-      // BRAND TOKEN EXTRACTION
-      let brandTokens = [];
-      if (typeof brandName === "string" && brandName.trim().length > 0) {
-        const cleanedBrand = brandName
-          .toLowerCase()
-          .replace(/[’']/g, "")
-          .replace(/company|co\.?|inc\.?|ltd\.?/gi, "")
-          .trim();
-        brandTokens = tokenize(cleanedBrand);
-      }
-
-      // NAME TOKEN EXTRACTION
-      let nameTokens = [];
-      if (typeof name === "string" && name.trim().length > 0) {
-        nameTokens = tokenize(name);
-      }
-
-      // Build regex clauses for any token
       const allTokens = [...brandTokens, ...nameTokens];
       const uniqueTokens = Array.from(new Set(allTokens));
 
@@ -397,7 +472,6 @@ app.post("/foods/usda-candidates", async (req, res) => {
         fallbackClauses.push({ normalized_name: tokenRegex });
       }
 
-      // Ensure fallbackClauses is applied only if non-empty
       if (fallbackClauses.length > 0) {
         const fallbackQuery = {
           "source.usda_data_type": "Branded",
@@ -406,12 +480,38 @@ app.post("/foods/usda-candidates", async (req, res) => {
 
         const fallbackCursor = collection
           .find(fallbackQuery, { projection: { ...projection, score: undefined } })
-          .limit(maxResults);
+          .limit(mongoFetchLimit);
 
-        results = await fallbackCursor.toArray();
-      } else {
-        results = [];
+        const fallbackResults = await fallbackCursor.toArray();
+
+        // Merge primary text results with fallback, de-duplicate by _id,
+        // then re-score and sort everything together.
+        const mergedById = new Map();
+
+        (results || []).forEach((doc) => {
+          mergedById.set(String(doc._id), doc);
+        });
+
+        fallbackResults.forEach((doc) => {
+          const key = String(doc._id);
+          if (!mergedById.has(key)) {
+            mergedById.set(key, doc);
+          }
+        });
+
+        const merged = Array.from(mergedById.values());
+        merged.forEach((doc) => {
+          computeUSDACombinedScore(doc, { name, brandName });
+        });
+        merged.sort((a, b) => (b._combinedScore || 0) - (a._combinedScore || 0));
+
+        results = merged;
       }
+    }
+
+    // Finally trim down to the requested limit
+    if (results && results.length > finalLimit) {
+      results = results.slice(0, finalLimit);
     }
 
     console.log(
