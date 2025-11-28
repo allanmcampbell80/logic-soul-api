@@ -207,10 +207,12 @@ app.post("/user-enriched-food-item", async (req, res) => {
   }
 });
 
-// GET /foods/barcode/:barcode  → fetch branded product by UPC/EAN
+// GET /foods/barcode/:barcode  → fetch best product by UPC/EAN
 app.get("/foods/barcode/:barcode", async (req, res) => {
   try {
-    if (!collection) return res.status(500).json({ error: "DB not ready" });
+    if (!collection) {
+      return res.status(500).json({ error: "DB not ready" });
+    }
 
     const raw = req.params.barcode;
     const cleaned = raw.replace(/\D/g, ""); // strip spaces, hyphens, etc.
@@ -219,31 +221,61 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
       return res.status(400).json({ error: "Invalid barcode" });
     }
 
-    // Normalize to a 16-digit numeric string to match normalized_upc in Mongo
+    // Normalize to a 16-digit numeric string to match normalized_upc / normalized_upc_16 in Mongo
     const normalized = cleaned.padStart(16, "0");
 
     console.log("[API] Raw:", raw, "Clean:", cleaned, "Normalized16:", normalized);
 
-    // Search ONLY the normalized_upc
-    // Search both normalized_upc (USDA) and normalized_upc_16 (Canada OFF)
-    const doc = await collection.findOne({
-    $or: [
-    { normalized_upc: normalized },
-    { normalized_upc_16: normalized }
-        ]
+    // 1) Prefer USDA "Branded" product if available (gold standard)
+    let doc = await collection.findOne({
+      normalized_upc: normalized,
+      "source.usda_data_type": "Branded",
     });
 
-    console.log("[API] Lookup result:", doc ? "FOUND" : "NOT FOUND");
+    if (doc) {
+      console.log("[API] Lookup result: FOUND USDA branded doc");
+      return res.json(doc);
+    }
+
+    // 2) Fallback: any product with matching normalized_upc or normalized_upc_16
+    doc = await collection.findOne({
+      $or: [
+        { normalized_upc: normalized },
+        { normalized_upc_16: normalized },
+      ],
+    });
+
+    console.log("[API] Lookup result (fallback):", doc ? "FOUND" : "NOT FOUND");
 
     if (!doc) {
-      return res.status(404).json({ 
-        error: "Not found", 
-        normalized_upc: normalized 
+      return res.status(404).json({
+        error: "Not found",
+        normalized_upc: normalized,
       });
     }
 
-    res.json(doc);
+    // 3) If this looks like a Canadian/OFF product with a linked USDA equivalent, try to promote that USDA doc
+    if (doc.usda_equivalent && doc.usda_equivalent.normalized_upc) {
+      const usdaNormalized = String(doc.usda_equivalent.normalized_upc)
+        .replace(/\D/g, "")
+        .padStart(16, "0");
 
+      const usdaDoc = await collection.findOne({
+        normalized_upc: usdaNormalized,
+        "source.usda_data_type": "Branded",
+      });
+
+      if (usdaDoc) {
+        console.log(
+          "[API] Promoting USDA equivalent for Canadian product:",
+          usdaNormalized
+        );
+        return res.json(usdaDoc);
+      }
+    }
+
+    // 4) Otherwise, just return whatever doc we found (OFF, user-enriched, etc.)
+    return res.json(doc);
   } catch (err) {
     console.error("Error fetching by barcode:", err);
     res.status(500).json({ error: "Internal server error" });
