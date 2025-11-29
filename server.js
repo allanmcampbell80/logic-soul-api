@@ -655,6 +655,83 @@ app.post("/foods/link-canadian-to-usda", async (req, res) => {
       }
     );
 
+    // After linking, merge aliases across the Canadian doc, the USDA doc,
+    // and any existing OFF/Canadian example with the same UPC.
+    try {
+      // Look for a separate OFF/Canadian doc with the same normalized UPC,
+      // excluding the current Canadian doc (which may be user-submitted).
+      const offDoc = await collection.findOne({
+        normalized_upc_16: normalizedCanadian,
+        is_canadian_product: true,
+        "source.user_submitted": { $ne: true },
+        _id: { $ne: canadianDoc._id },
+      });
+
+      const canadianAlt = Array.isArray(canadianDoc.alt_names)
+        ? canadianDoc.alt_names
+        : [];
+      const usdaAlt = Array.isArray(usdaDoc.alt_names)
+        ? usdaDoc.alt_names
+        : [];
+      const offAlt =
+        offDoc && Array.isArray(offDoc.alt_names) ? offDoc.alt_names : [];
+
+      const mergedAltSet = new Set();
+
+      const pushAliases = (list) => {
+        for (const raw of list) {
+          if (!raw) continue;
+          const trimmed = String(raw).trim();
+          if (!trimmed) continue;
+          mergedAltSet.add(trimmed.toLowerCase());
+        }
+      };
+
+      pushAliases(canadianAlt);
+      pushAliases(usdaAlt);
+      pushAliases(offAlt);
+
+      const mergedAltNames = Array.from(mergedAltSet);
+
+      const bulkOps = [];
+
+      // Update the Canadian doc
+      bulkOps.push({
+        updateOne: {
+          filter: { _id: canadianDoc._id },
+          update: { $set: { alt_names: mergedAltNames } },
+        },
+      });
+
+      // Update the USDA doc
+      bulkOps.push({
+        updateOne: {
+          filter: { _id: usdaDoc._id },
+          update: { $set: { alt_names: mergedAltNames } },
+        },
+      });
+
+      // If we found a distinct OFF/Canadian doc, update it as well
+      if (offDoc) {
+        bulkOps.push({
+          updateOne: {
+            filter: { _id: offDoc._id },
+            update: { $set: { alt_names: mergedAltNames } },
+          },
+        });
+      }
+
+      if (bulkOps.length > 0) {
+        await collection.bulkWrite(bulkOps);
+      }
+    } catch (aliasErr) {
+      console.error(
+        "[Link Canadian→USDA] Error while merging alt_names across linked docs:",
+        aliasErr
+      );
+      // Do not fail the main link operation if alias propagation fails.
+    }
+
     res.json({
       ok: true,
       matchedCount: updateResult.matchedCount,
