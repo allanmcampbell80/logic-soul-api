@@ -449,13 +449,33 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
 
 function normalizeBrand(str) {
   if (!str || typeof str !== "string") return "";
-  return str
+
+  // Basic cleanup: lower-case, strip apostrophes and common company suffixes,
+  // drop non-alphanumerics, normalize whitespace.
+  const cleaned = str
     .toLowerCase()
     .replace(/[’']/g, "") // remove apostrophes
     .replace(/company|companies|co\.?|inc\.?|ltd\.?|llc\.?|corp\.?/gi, "")
     .replace(/[^a-z0-9\s]/g, " ")
     .trim()
     .replace(/\s+/g, " ");
+
+  if (!cleaned) return "";
+
+  // Extra normalization step: gently trim a trailing "s" from tokens that are
+  // likely plural/possessive brand variants. This makes
+  // "Campbells", "Campbell's" → "campbell", so fuzzyBrandMatches can link
+  // "Campbells" to "Campbell Soup".
+  const parts = cleaned.split(" ");
+  const normalizedParts = parts.map((p) => {
+    // Only touch reasonably long tokens so we don't break things like "ms" or "us".
+    if (p.length > 3 && p.endsWith("s")) {
+      return p.slice(0, -1);
+    }
+    return p;
+  });
+
+  return normalizedParts.join(" ");
 }
 
 function tokenizeName(str) {
