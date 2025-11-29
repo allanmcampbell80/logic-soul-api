@@ -93,6 +93,127 @@ function buildUserEnrichedDoc(payload, headers) {
   return docToInsert;
 }
 
+// Ensure that each parsed ingredient has a corresponding simple-ingredient entry.
+// Simple ingredients live in the same collection as docs with:
+//   type: "ingredient", is_simple_ingredient: true
+async function ensureSimpleIngredientsFromParsedList(
+  ingredientsParsed,
+  normalizedUPC16,
+  sourceTag
+) {
+  if (!collection) return;
+  if (!Array.isArray(ingredientsParsed) || ingredientsParsed.length === 0) return;
+
+  const now = new Date();
+  const normalized = normalizedUPC16 || null;
+
+  // 1. Skip entirely if we've already indexed simple ingredients for this UPC
+  if (normalized) {
+    const alreadyIndexed = await collection.findOne({
+      normalized_upc_16: normalized,
+      ingredients_indexed_for_simple: true,
+    });
+
+    if (alreadyIndexed) {
+      console.log(
+        "[Ingredients] Simple ingredients already indexed for product",
+        normalized
+      );
+      return;
+    }
+  }
+
+  const normalizeName = (s) => {
+    if (!s || typeof s !== "string") return null;
+    return s
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+  };
+
+  // Build a unique set of normalized ingredient names
+  const normalizedNamesSet = new Set();
+  for (const raw of ingredientsParsed) {
+    const norm = normalizeName(raw);
+    if (!norm) continue;
+    normalizedNamesSet.add(norm);
+  }
+
+  const normalizedNames = Array.from(normalizedNamesSet);
+  if (normalizedNames.length === 0) return;
+
+  // Look up which of these normalized names already exist as simple ingredients
+  const existing = await collection
+    .find({ is_simple_ingredient: true, normalized_name: { $in: normalizedNames } })
+    .project({ normalized_name: 1 })
+    .toArray();
+
+  const existingSet = new Set(existing.map((doc) => doc.normalized_name));
+
+  const docsToInsert = [];
+
+  for (const norm of normalizedNames) {
+    if (existingSet.has(norm)) continue; // already have this simple ingredient
+
+    // Find a representative original string to use as the display name
+    const original =
+      ingredientsParsed.find((raw) => normalizeName(raw) === norm) || norm;
+
+    docsToInsert.push({
+      type: "ingredient",
+      is_simple_ingredient: true,
+      enriched: false, // stub; to be enriched by GPT later
+      name: original,
+      normalized_name: norm,
+      first_seen: {
+        normalized_upc_16: normalized,
+        source: sourceTag || "user_enriched_canadian_product",
+        at: now,
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  if (docsToInsert.length > 0) {
+    try {
+      await collection.insertMany(docsToInsert, { ordered: false });
+      console.log(
+        "[Ingredients] Inserted",
+        docsToInsert.length,
+        "new simple ingredients from product",
+        normalized
+      );
+    } catch (ingErr) {
+      console.error("[Ingredients] Error inserting simple ingredients:", ingErr);
+    }
+  } else {
+    console.log(
+      "[Ingredients] No new simple ingredients to insert for product",
+      normalized
+    );
+  }
+
+  // 2. Mark this UPC as "indexed for simple ingredients" so we don't do this again
+  if (normalized) {
+    try {
+      await collection.updateMany(
+        { normalized_upc_16: normalized },
+        { $set: { ingredients_indexed_for_simple: true } }
+      );
+      console.log(
+        "[Ingredients] Marked UPC as indexed for simple ingredients:",
+        normalized
+      );
+    } catch (flagErr) {
+      console.error(
+        "[Ingredients] Error marking UPC as ingredients_indexed_for_simple:",
+        flagErr
+      );
+    }
+  }
+}
+
 // --- Express middleware ---
 app.use(cors());
 app.use(express.json());
@@ -154,6 +275,22 @@ app.post("/foods/user-enriched", async (req, res) => {
 
     const result = await collection.insertOne(docToInsert);
 
+    // Ensure all parsed ingredients have simple-ingredient stubs for later enrichment
+    if (
+      Array.isArray(docToInsert.ingredients_parsed) &&
+      docToInsert.ingredients_parsed.length > 0
+    ) {
+      try {
+        await ensureSimpleIngredientsFromParsedList(
+          docToInsert.ingredients_parsed,
+          docToInsert.normalized_upc_16 || docToInsert.normalized_upc || null,
+          "user_enriched_canadian_product"
+        );
+      } catch (ingErr) {
+        console.error("[User-Enriched] Error ensuring simple ingredients:", ingErr);
+      }
+    }
+
     res.status(201).json({
       ok: true,
       insertedId: result.insertedId,
@@ -192,6 +329,25 @@ app.post("/user-enriched-food-item", async (req, res) => {
     }
 
     const result = await collection.insertOne(docToInsert);
+
+    // Ensure all parsed ingredients have simple-ingredient stubs for later enrichment
+    if (
+      Array.isArray(docToInsert.ingredients_parsed) &&
+      docToInsert.ingredients_parsed.length > 0
+    ) {
+      try {
+        await ensureSimpleIngredientsFromParsedList(
+          docToInsert.ingredients_parsed,
+          docToInsert.normalized_upc_16 || docToInsert.normalized_upc || null,
+          "user_enriched_canadian_product"
+        );
+      } catch (ingErr) {
+        console.error(
+          "[User-Enriched Alias] Error ensuring simple ingredients:",
+          ingErr
+        );
+      }
+    }
 
     res.status(201).json({
       ok: true,
