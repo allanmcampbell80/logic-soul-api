@@ -2,6 +2,7 @@
 import express from "express";
 import cors from "cors";
 import { MongoClient, ServerApiVersion } from "mongodb";
+import { findBestMatchesForMealItems } from "./services/mealSearch.js";
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -26,11 +27,12 @@ const client = new MongoClient(uri, {
   },
 });
 
+let db;
 let collection;
 
 async function initMongo() {
   await client.connect();
-  const db = client.db(dbName);
+  db = client.db(dbName);
   collection = db.collection(collectionName);
   console.log("Connected to MongoDB, collection:", collectionName);
 }
@@ -142,9 +144,17 @@ async function ensureSimpleIngredientsFromParsedList(
   const normalizedNames = Array.from(normalizedNamesSet);
   if (normalizedNames.length === 0) return;
 
-  // Look up which of these normalized names already exist as simple ingredients
+  // Look up which of these normalized names already exist as either a confirmed
+  // simple ingredient or a potential simple ingredient stub created from
+  // previous product ingredient parsing.
   const existing = await collection
-    .find({ is_simple_ingredient: true, normalized_name: { $in: normalizedNames } })
+    .find({
+      normalized_name: { $in: normalizedNames },
+      $or: [
+        { is_simple_ingredient: true },
+        { is_potential_simple_ingredient: true },
+      ],
+    })
     .project({ normalized_name: 1 })
     .toArray();
 
@@ -161,7 +171,11 @@ async function ensureSimpleIngredientsFromParsedList(
 
     docsToInsert.push({
       type: "ingredient",
-      is_simple_ingredient: true,
+      // These are *not* confirmed canonical simple ingredients yet.
+      // They are potential simple ingredients inferred from product labels,
+      // and will later go through a verification/enrichment process before
+      // being promoted to is_simple_ingredient: true.
+      is_potential_simple_ingredient: true,
       enriched: false, // stub; to be enriched by GPT later
       name: original,
       normalized_name: norm,
@@ -442,6 +456,41 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
   } catch (err) {
     console.error("Error fetching by barcode:", err);
     res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/meal-search
+// Accepts a parsed meal JSON (from GPT meal parser) and returns best DB matches.
+app.post("/api/meal-search", async (req, res) => {
+  try {
+    if (!db || !collection) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const parsedMeal = req.body;
+
+    if (!parsedMeal || !Array.isArray(parsedMeal.items)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid payload: expected { rawText, mealType, items: [...] }",
+      });
+    }
+
+    const result = await findBestMatchesForMealItems(db, parsedMeal, {
+      maxPerItem: 5,
+    });
+
+    return res.json({
+      ok: true,
+      result,
+    });
+  } catch (err) {
+    console.error("[MealSearch] Error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Meal search failed",
+      details: err.message || String(err),
+    });
   }
 });
 
