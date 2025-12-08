@@ -232,9 +232,65 @@ async function ensureSimpleIngredientsFromParsedList(
 app.use(cors());
 app.use(express.json());
 
+
 // Health check
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "LogicSoul API" });
+});
+
+// POST /users/ensure → create or update a user by deviceId
+app.post("/users/ensure", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+    const { deviceId, platform, appVersion, locale } = req.body || {};
+    if (
+      typeof deviceId !== "string" ||
+      !deviceId.trim()
+    ) {
+      return res.status(400).json({ ok: false, error: "Missing or invalid 'deviceId'" });
+    }
+    const usersCollection = db.collection("users");
+    const now = new Date();
+    const update = {
+      $setOnInsert: {
+        deviceId: deviceId.trim(),
+        createdAt: now,
+      },
+      $set: {
+        platform: typeof platform === "string" ? platform : null,
+        appVersion: typeof appVersion === "string" ? appVersion : null,
+        locale: typeof locale === "string" ? locale : null,
+        lastSeenAt: now,
+      },
+    };
+    const options = {
+      upsert: true,
+      returnDocument: "after",
+    };
+    const result = await usersCollection.findOneAndUpdate(
+      { deviceId: deviceId.trim() },
+      update,
+      options
+    );
+    const user = result.value;
+    return res.json({
+      ok: true,
+      user: {
+        id: user._id.toString(),
+        deviceId: user.deviceId,
+        platform: user.platform || null,
+        appVersion: user.appVersion || null,
+        locale: user.locale || null,
+        createdAt: user.createdAt,
+        lastSeenAt: user.lastSeenAt,
+      },
+    });
+  } catch (err) {
+    console.error("[Users/Ensure] Error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to ensure user" });
+  }
 });
 
 // POST /foods  → insert a product or ingredient
