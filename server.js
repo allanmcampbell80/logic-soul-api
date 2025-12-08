@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import { MongoClient, ServerApiVersion } from "mongodb";
 import { findBestMatchesForMealItems } from "./services/mealSearch.js";
+import { ensureUser, updateUserProfile} from "./services/users.js";
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -241,55 +242,31 @@ app.get("/", (req, res) => {
 // POST /users/ensure → create or update a user by deviceId
 app.post("/users/ensure", async (req, res) => {
   try {
-    if (!db) {
-      return res.status(500).json({ ok: false, error: "DB not ready" });
-    }
-    const { deviceId, platform, appVersion, locale } = req.body || {};
-    if (
-      typeof deviceId !== "string" ||
-      !deviceId.trim()
-    ) {
-      return res.status(400).json({ ok: false, error: "Missing or invalid 'deviceId'" });
-    }
-    const usersCollection = db.collection("users");
-    const now = new Date();
-    const update = {
-      $setOnInsert: {
-        deviceId: deviceId.trim(),
-        createdAt: now,
-      },
-      $set: {
-        platform: typeof platform === "string" ? platform : null,
-        appVersion: typeof appVersion === "string" ? appVersion : null,
-        locale: typeof locale === "string" ? locale : null,
-        lastSeenAt: now,
-      },
-    };
-    const options = {
-      upsert: true,
-      returnDocument: "after",
-    };
-    const result = await usersCollection.findOneAndUpdate(
-      { deviceId: deviceId.trim() },
-      update,
-      options
-    );
-    const user = result.value;
-    return res.json({
-      ok: true,
-      user: {
-        id: user._id.toString(),
-        deviceId: user.deviceId,
-        platform: user.platform || null,
-        appVersion: user.appVersion || null,
-        locale: user.locale || null,
-        createdAt: user.createdAt,
-        lastSeenAt: user.lastSeenAt,
-      },
-    });
+    const user = await ensureUser(db, req.body || {});
+    return res.json({ ok: true, user });
   } catch (err) {
     console.error("[Users/Ensure] Error:", err);
-    return res.status(500).json({ ok: false, error: "Failed to ensure user" });
+    const status = err.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err.message || "Failed to ensure user",
+    });
+  }
+});
+
+// PATCH /users/:id/profile → update basic profile info
+app.patch("/users/:id/profile", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await updateUserProfile(db, id, req.body || {});
+    return res.json({ ok: true, user });
+  } catch (err) {
+    console.error("[Users/Profile] Error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err.message || "Failed to update user profile",
+    });
   }
 });
 
