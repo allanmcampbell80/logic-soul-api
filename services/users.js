@@ -1,0 +1,106 @@
+// services/users.js
+import { ObjectId } from "mongodb";
+
+function mapUserDoc(user) {
+  if (!user) return null;
+  return {
+    id: user._id.toString(),
+    deviceId: user.deviceId,
+    platform: user.platform ?? null,
+    appVersion: user.appVersion ?? null,
+    locale: user.locale ?? null,
+    createdAt: user.createdAt,
+    lastSeenAt: user.lastSeenAt,
+    displayName: user.displayName ?? null,
+    gender: user.gender ?? null,
+    age: user.age ?? null,
+    heightCm: user.heightCm ?? null,
+    weightKg: user.weightKg ?? null,
+  };
+}
+
+export async function ensureUser(db, payload) {
+  if (!db) throw new Error("DB not ready");
+
+  const { deviceId, platform, appVersion, locale } = payload || {};
+
+  if (typeof deviceId !== "string" || !deviceId.trim()) {
+    const err = new Error("Missing or invalid 'deviceId'");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const usersCollection = db.collection("users");
+  const now = new Date();
+  const cleanDeviceId = deviceId.trim();
+
+  const update = {
+    $setOnInsert: {
+      deviceId: cleanDeviceId,
+      createdAt: now,
+    },
+    $set: {
+      platform: typeof platform === "string" ? platform : null,
+      appVersion: typeof appVersion === "string" ? appVersion : null,
+      locale: typeof locale === "string" ? locale : null,
+      lastSeenAt: now,
+    },
+  };
+
+  const options = {
+    upsert: true,
+    returnDocument: "after",
+  };
+
+  const result = await usersCollection.findOneAndUpdate(
+    { deviceId: cleanDeviceId },
+    update,
+    options
+  );
+
+  if (!result.value) {
+    throw new Error("Failed to ensure user");
+  }
+
+  return mapUserDoc(result.value);
+}
+
+export async function updateUserProfile(db, userId, profile) {
+  if (!db) throw new Error("DB not ready");
+
+  const { displayName, gender, age, heightCm, weightKg } = profile || {};
+
+  if (!userId) {
+    const err = new Error("Missing 'userId'");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const usersCollection = db.collection("users");
+  const now = new Date();
+
+  const updateDoc = {
+    $set: {
+      displayName: displayName ?? null,
+      gender: gender ?? null,
+      age: typeof age === "number" ? age : null,
+      heightCm: typeof heightCm === "number" ? heightCm : null,
+      weightKg: typeof weightKg === "number" ? weightKg : null,
+      lastSeenAt: now,
+    },
+  };
+
+  const result = await usersCollection.findOneAndUpdate(
+    { _id: new ObjectId(userId) },
+    updateDoc,
+    { returnDocument: "after" }
+  );
+
+  if (!result.value) {
+    const err = new Error("User not found");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  return mapUserDoc(result.value);
+}
