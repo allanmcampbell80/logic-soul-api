@@ -100,18 +100,23 @@ export async function updateUserProfile(db, userId, profile) {
     throw err;
   }
 
-  let objectId;
-  try {
-    objectId = new ObjectId(userId);
-  } catch (e) {
-    console.error("[updateUserProfile] invalid ObjectId:", e);
-    const err = new Error("Invalid 'userId' format");
-    err.statusCode = 400;
-    throw err;
-  }
-
   const usersCollection = db.collection("users");
   const now = new Date();
+
+  // Build a robust query that can match:
+  //  1. _id as ObjectId
+  //  2. _id as string
+  //  3. deviceId equal to this id (extra safety)
+  const orClauses = [
+    { deviceId: userId },        // if we ever pass deviceId directly
+    { _id: userId },             // legacy string _id, if it exists
+  ];
+
+  if (ObjectId.isValid(userId)) {
+    orClauses.unshift({ _id: new ObjectId(userId) }); // preferred match
+  }
+
+  const query = orClauses.length === 1 ? orClauses[0] : { $or: orClauses };
 
   const updateDoc = {
     $set: {
@@ -125,7 +130,7 @@ export async function updateUserProfile(db, userId, profile) {
   };
 
   const result = await usersCollection.findOneAndUpdate(
-    { _id: objectId },
+    query,
     updateDoc,
     { returnDocument: "after" }
   );
