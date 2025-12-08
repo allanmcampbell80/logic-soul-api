@@ -89,10 +89,23 @@ export async function ensureUser(db, payload) {
 export async function updateUserProfile(db, userId, profile) {
   if (!db) throw new Error("DB not ready");
 
+  console.log("[updateUserProfile] incoming userId:", userId);
+  console.log("[updateUserProfile] incoming profile:", profile);
+
   const { displayName, gender, age, heightCm, weightKg } = profile || {};
 
-  if (!userId) {
-    const err = new Error("Missing 'userId'");
+  if (!userId || typeof userId !== "string") {
+    const err = new Error("Missing or invalid 'userId'");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  let objectId;
+  try {
+    objectId = new ObjectId(userId);
+  } catch (e) {
+    console.error("[updateUserProfile] invalid ObjectId:", e);
+    const err = new Error("Invalid 'userId' format");
     err.statusCode = 400;
     throw err;
   }
@@ -112,10 +125,15 @@ export async function updateUserProfile(db, userId, profile) {
   };
 
   const result = await usersCollection.findOneAndUpdate(
-    { _id: new ObjectId(userId) },
+    { _id: objectId },
     updateDoc,
     { returnDocument: "after" }
   );
+
+  console.log("[updateUserProfile] findOneAndUpdate result:", {
+    hasValue: !!result?.value,
+    lastErrorObject: result?.lastErrorObject,
+  });
 
   if (!result.value) {
     const err = new Error("User not found");
