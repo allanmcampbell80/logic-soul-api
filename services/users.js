@@ -22,6 +22,8 @@ function mapUserDoc(user) {
 export async function ensureUser(db, payload) {
   if (!db) throw new Error("DB not ready");
 
+  console.log("[ensureUser] incoming payload:", payload);
+
   const { deviceId, platform, appVersion, locale } = payload || {};
 
   if (typeof deviceId !== "string" || !deviceId.trim()) {
@@ -49,7 +51,10 @@ export async function ensureUser(db, payload) {
 
   const options = {
     upsert: true,
+    // New driver style:
     returnDocument: "after",
+    // Old driver style (for compatibility):
+    returnOriginal: false,
   };
 
   const result = await usersCollection.findOneAndUpdate(
@@ -58,11 +63,27 @@ export async function ensureUser(db, payload) {
     options
   );
 
-  if (!result.value) {
-    throw new Error("Failed to ensure user");
+  console.log("[ensureUser] findOneAndUpdate result:", {
+    hasValue: !!result?.value,
+    lastErrorObject: result?.lastErrorObject,
+  });
+
+  let doc = result.value;
+
+  // Fallback in case the driver still doesn't populate `value`
+  if (!doc) {
+    console.log("[ensureUser] value null, trying explicit findOne...");
+    doc = await usersCollection.findOne({ deviceId: cleanDeviceId });
+    console.log("[ensureUser] fallback findOne found doc:", !!doc);
   }
 
-  return mapUserDoc(result.value);
+  if (!doc) {
+    const err = new Error("Failed to ensure user");
+    err.statusCode = 500;
+    throw err;
+  }
+
+  return mapUserDoc(doc);
 }
 
 export async function updateUserProfile(db, userId, profile) {
