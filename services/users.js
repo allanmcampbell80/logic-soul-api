@@ -17,6 +17,7 @@ function mapUserDoc(user) {
     age: user.age ?? null,
     heightCm: user.heightCm ?? null,
     weightKg: user.weightKg ?? null,
+    fingerScalePoints: user.fingerScalePoints ?? null,
   };
 }
 
@@ -93,7 +94,7 @@ export async function updateUserProfile(db, userId, profile) {
   console.log("[updateUserProfile] incoming userId (deviceId):", userId);
   console.log("[updateUserProfile] incoming profile:", profile);
 
-  const { displayName, gender, age, heightCm, weightKg } = profile || {};
+  const { displayName, gender, age, heightCm, weightKg, fingerScalePoints } = profile || {};
 
   if (!userId || typeof userId !== "string") {
     const err = new Error("Missing or invalid 'userId'");
@@ -114,6 +115,7 @@ export async function updateUserProfile(db, userId, profile) {
       age: typeof age === "number" ? age : null,
       heightCm: typeof heightCm === "number" ? heightCm : null,
       weightKg: typeof weightKg === "number" ? weightKg : null,
+      fingerScalePoints: typeof fingerScalePoints === "number" ? fingerScalePoints : null,
       lastSeenAt: now,
     },
   };
