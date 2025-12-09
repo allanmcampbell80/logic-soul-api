@@ -4,7 +4,8 @@ import { ObjectId } from "mongodb";
 function mapUserDoc(user) {
   if (!user) return null;
   return {
-    id: user._id.toString(),
+    // Expose the stable public id as the deviceId, not Mongo's _id
+    id: user.deviceId,
     deviceId: user.deviceId,
     platform: user.platform ?? null,
     appVersion: user.appVersion ?? null,
@@ -89,7 +90,7 @@ export async function ensureUser(db, payload) {
 export async function updateUserProfile(db, userId, profile) {
   if (!db) throw new Error("DB not ready");
 
-  console.log("[updateUserProfile] incoming userId:", userId);
+  console.log("[updateUserProfile] incoming userId (deviceId):", userId);
   console.log("[updateUserProfile] incoming profile:", profile);
 
   const { displayName, gender, age, heightCm, weightKg } = profile || {};
@@ -103,20 +104,8 @@ export async function updateUserProfile(db, userId, profile) {
   const usersCollection = db.collection("users");
   const now = new Date();
 
-  // Build a robust query that can match:
-  //  1. _id as ObjectId
-  //  2. _id as string
-  //  3. deviceId equal to this id (extra safety)
-  const orClauses = [
-    { deviceId: userId },        // if we ever pass deviceId directly
-    { _id: userId },             // legacy string _id, if it exists
-  ];
-
-  if (ObjectId.isValid(userId)) {
-    orClauses.unshift({ _id: new ObjectId(userId) }); // preferred match
-  }
-
-  const query = orClauses.length === 1 ? orClauses[0] : { $or: orClauses };
+  // We now treat userId as deviceId, on purpose.
+  const query = { deviceId: userId };
 
   const updateDoc = {
     $set: {
