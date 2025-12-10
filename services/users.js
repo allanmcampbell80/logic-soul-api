@@ -1,6 +1,5 @@
 // services/users.js
 import { ObjectId } from "mongodb";
-import { usersCollection } from "./mongo.js";
 
 function mapUserDoc(user) {
   if (!user) return null;
