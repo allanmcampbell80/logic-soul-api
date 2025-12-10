@@ -1,12 +1,12 @@
 // services/users.js
 import { ObjectId } from "mongodb";
+import { usersCollection } from "./mongo.js";
 
 function mapUserDoc(user) {
   if (!user) return null;
   return {
-    // Expose the stable public id as the deviceId, not Mongo's _id
-    id: user.deviceId,
-    deviceId: user.deviceId,
+    id: user._id.toString(),            // ✅ now the Mongo _id
+    deviceId: user.deviceId,           // still available explicitly
     platform: user.platform ?? null,
     appVersion: user.appVersion ?? null,
     locale: user.locale ?? null,
@@ -92,10 +92,8 @@ export async function ensureUser(db, payload) {
 export async function updateUserProfile(db, userId, profile) {
   if (!db) throw new Error("DB not ready");
 
-  console.log("[updateUserProfile] incoming userId (deviceId):", userId);
+  console.log("[updateUserProfile] incoming userId (_id):", userId);
   console.log("[updateUserProfile] incoming profile:", profile);
-
-  const { displayName, gender, age, heightCm, weightKg, fingerScalePoints, fingerScaleCm } = profile || {};
 
   if (!userId || typeof userId !== "string") {
     const err = new Error("Missing or invalid 'userId'");
@@ -106,18 +104,18 @@ export async function updateUserProfile(db, userId, profile) {
   const usersCollection = db.collection("users");
   const now = new Date();
 
-  // We now treat userId as deviceId, on purpose.
-  const query = { deviceId: userId };
+  // Now treat userId as Mongo _id
+  const query = { _id: new ObjectId(userId) };
 
   const updateDoc = {
     $set: {
-      displayName: displayName ?? null,
-      gender: gender ?? null,
-      age: typeof age === "number" ? age : null,
-      heightCm: typeof heightCm === "number" ? heightCm : null,
-      weightKg: typeof weightKg === "number" ? weightKg : null,
-      fingerScalePoints: typeof fingerScalePoints === "number" ? fingerScalePoints : null,
-      fingerScaleCm: typeof fingerScaleCm === "number" ? fingerScaleCm : null,
+      displayName: profile.displayName ?? null,
+      gender: profile.gender ?? null,
+      age: typeof profile.age === "number" ? profile.age : null,
+      heightCm: typeof profile.heightCm === "number" ? profile.heightCm : null,
+      weightKg: typeof profile.weightKg === "number" ? profile.weightKg : null,
+      fingerScalePoints: typeof profile.fingerScalePoints === "number" ? profile.fingerScalePoints : null,
+      fingerScaleCm: typeof profile.fingerScaleCm === "number" ? profile.fingerScaleCm : null,
       lastSeenAt: now,
     },
   };
