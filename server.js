@@ -4,6 +4,7 @@ import cors from "cors";
 import { MongoClient, ServerApiVersion } from "mongodb";
 import { findBestMatchesForMealItems } from "./services/mealSearch.js";
 import { ensureUser, updateUserProfile } from "./services/users.js";
+import { logUserMeal } from "./services/userMeals.js";
 import { getFoodDetails } from "./services/foodDetails.js";
 
 const app = express();
@@ -269,6 +270,23 @@ app.patch("/users/:id/profile", async (req, res) => {
       ok: false,
       error: err.message || "Failed to update user profile",
     });
+  }
+});
+
+app.post("/users/:userId/meals", async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    console.log("[Users/Meals] incoming userId:", userId);
+    console.log("[Users/Meals] incoming payload:", req.body);
+
+    const meal = await logUserMeal(userId, req.body);
+
+    res.json({ ok: true, meal });
+  } catch (err) {
+    console.error("[Users/Meals] Error:", err);
+    res
+      .status(err.statusCode || 500)
+      .json({ ok: false, error: err.message || "Failed to log meal" });
   }
 });
 
