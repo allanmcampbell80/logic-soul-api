@@ -3,7 +3,8 @@ import express from "express";
 import cors from "cors";
 import { MongoClient, ServerApiVersion } from "mongodb";
 import { findBestMatchesForMealItems } from "./services/mealSearch.js";
-import { ensureUser, updateUserProfile} from "./services/users.js";
+import { ensureUser, updateUserProfile } from "./services/users.js";
+import { getFoodDetails } from "./services/foodDetails.js";
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -238,6 +239,7 @@ app.use(express.json());
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "LogicSoul API" });
 });
+
 
 // POST /users/ensure → create or update a user by deviceId
 app.post("/users/ensure", async (req, res) => {
@@ -489,6 +491,72 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
   } catch (err) {
     console.error("Error fetching by barcode:", err);
     res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /foods/details?ids=... → fetch nutrient/details for one or more food IDs
+// Usage examples:
+//   /foods/details?ids=69249d5d5f482c9b7d71626e
+//   /foods/details?ids=69249d5d5f482c9b7d71626e,6924a05a5f482c9b7d71923f
+//   /foods/details?ids=id1&ids=id2&ids=id3
+app.get("/foods/details", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({
+        ok: false,
+        error: "DB not ready",
+      });
+    }
+
+    let { ids } = req.query;
+
+    if (!ids) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing required query parameter 'ids'.",
+      });
+    }
+
+    // Allow either a single comma-separated string or repeated ?ids=...&ids=...
+    if (Array.isArray(ids)) {
+      ids = ids
+        .flatMap((v) =>
+          String(v)
+            .split(",")
+            .map((s) => s.trim())
+        )
+        .filter(Boolean);
+    } else {
+      ids = String(ids)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+
+    if (!ids.length) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "No valid IDs provided. Pass one or more MongoDB IDs via ?ids=id1,id2,…",
+      });
+    }
+
+    console.log("[FoodDetails] Incoming ids:", ids);
+
+    const items = await getFoodDetails(db, ids);
+
+    return res.json({
+      ok: true,
+      count: Array.isArray(items) ? items.length : 0,
+      items: items || [],
+    });
+  } catch (err) {
+    console.error("[FoodDetails] Error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Failed to fetch food details.",
+      details: err && err.message ? err.message : String(err),
+    });
   }
 });
 
@@ -806,7 +874,7 @@ app.post("/foods/usda-candidates", async (req, res) => {
       name: doc.name,
       normalizedName: doc.normalized_name,
       normalizedUPC: doc.normalized_upc,
-      normalizedUPC16: doc.normalized_upc, // same for now
+      normalizedUPC16: doc.normalized_upc_16 ?? doc.normalized_upc,
       brandName: doc.brand?.name ?? null,
       brandOwner: doc.brand?.owner ?? null,
       marketCountry: doc.brand?.market_country ?? null,
