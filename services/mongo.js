@@ -1,4 +1,3 @@
-
 // services/mongo.js
 import { MongoClient } from "mongodb";
 
@@ -31,12 +30,14 @@ async function initMongo() {
 let usersCollection;
 let userMealsCollection;
 let foodItemsCollection;
+let userDailyTotalsCollection;
 
 // Call init immediately so collections are ready
 const ready = initMongo().then((db) => {
   usersCollection = db.collection("users");
   userMealsCollection = db.collection("user_meals");
   foodItemsCollection = db.collection("food_items");
+  userDailyTotalsCollection = db.collection("user_daily_totals");
 });
 
 export {
@@ -44,4 +45,5 @@ export {
   usersCollection,
   userMealsCollection,
   foodItemsCollection,
+  userDailyTotalsCollection,
 };
