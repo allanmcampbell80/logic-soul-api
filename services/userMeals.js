@@ -1,9 +1,25 @@
 // services/userMeals.js
 import { ObjectId } from "mongodb";
-import { usersCollection, userMealsCollection } from "./mongo.js";
+import { usersCollection, userMealsCollection, foodItemsCollection } from "./mongo.js";
 
 // userMealsCollection should be initialized in mongo.js like:
 // export const userMealsCollection = db.collection("user_meals");
+
+// Nutrient keys from foods.nutrients[].key that we want to aggregate
+const DAILY_PANEL_NUTRIENTS = {
+  energy_kcal: { field: "energy_kcal", unit: "kcal" },
+  protein: { field: "protein_g", unit: "g" },
+  total_lipid_fat: { field: "fat_g", unit: "g" },
+  fatty_acids_total_saturated: { field: "sat_fat_g", unit: "g" },
+  fatty_acids_total_trans: { field: "trans_fat_g", unit: "g" },
+  carbohydrate: { field: "carbs_g", unit: "g" },
+  fiber: { field: "fiber_g", unit: "g" },
+  total_sugars: { field: "sugars_g", unit: "g" },
+  sodium: { field: "sodium_mg", unit: "mg" },
+  potassium_k: { field: "potassium_mg", unit: "mg" },
+  calcium: { field: "calcium_mg", unit: "mg" },
+  iron: { field: "iron_mg", unit: "mg" },
+};
 
 export async function logUserMeal(userId, payload) {
   if (!ObjectId.isValid(userId)) {
@@ -71,4 +87,161 @@ export async function logUserMeal(userId, payload) {
       confidence: it.confidence
     }))
   };
+}
+
+export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
+  if (!db) throw new Error("DB not ready");
+  if (!userId || !dateKey) return;
+
+  // We use the shared collections from mongo.js for meals and foods,
+  // and only use `db` directly for the daily totals collection.
+  const dailyTotalsCollection = db.collection("user_daily_totals");
+  const userObjectId = new ObjectId(userId);
+
+  console.log("[recomputeDailyNutritionTotals] userId:", userId, "dateKey:", dateKey);
+
+  // 1. Load all meals for this user + date
+  const meals = await userMealsCollection
+    .find({ userId: userObjectId, dateKey })
+    .toArray();
+
+  if (!meals.length) {
+    console.log("[recomputeDailyNutritionTotals] no meals for this date, upserting zero totals");
+
+    const now = new Date();
+    const emptyTotals = Object.values(DAILY_PANEL_NUTRIENTS).reduce((acc, cfg) => {
+      acc[cfg.field] = 0;
+      return acc;
+    }, {});
+
+    await dailyTotalsCollection.updateOne(
+      { userId: userObjectId, dateKey },
+      {
+        $set: {
+          totals: emptyTotals,
+          timezone: "UTC",
+          updatedAt: now,
+        },
+        $setOnInsert: { createdAt: now },
+      },
+      { upsert: true }
+    );
+
+    return;
+  }
+
+  // 2. Aggregate total grams per foodId for that day
+  const foodGramsById = new Map(); // foodId string -> grams
+
+  for (const meal of meals) {
+    for (const item of meal.items || []) {
+      if (!item.foodId) continue;
+
+      const foodIdStr =
+        typeof item.foodId === "string"
+          ? item.foodId
+          : item.foodId.toString();
+
+      const qty = item.quantity || {};
+      const unit = qty.unit || item.quantityUnit || "g";
+      const value = typeof qty.value === "number" ? qty.value : null;
+
+      if (!value || unit.toLowerCase() !== "g") continue;
+
+      const prev = foodGramsById.get(foodIdStr) || 0;
+      foodGramsById.set(foodIdStr, prev + value);
+    }
+  }
+
+  if (!foodGramsById.size) {
+    console.log("[recomputeDailyNutritionTotals] no gram-based quantities found, writing zero totals");
+    const now = new Date();
+    const emptyTotals = Object.values(DAILY_PANEL_NUTRIENTS).reduce((acc, cfg) => {
+      acc[cfg.field] = 0;
+      return acc;
+    }, {});
+
+    await dailyTotalsCollection.updateOne(
+      { userId: userObjectId, dateKey },
+      {
+        $set: {
+          totals: emptyTotals,
+          timezone: "UTC",
+          updatedAt: now,
+        },
+        $setOnInsert: { createdAt: now },
+      },
+      { upsert: true }
+    );
+    return;
+  }
+
+  // 3. Load the corresponding foods
+  const foodObjectIds = Array.from(foodGramsById.keys()).map((id) => new ObjectId(id));
+  const foods = await foodItemsCollection
+    .find({ _id: { $in: foodObjectIds } })
+    .toArray();
+
+  // 4. Initialize daily totals
+  const totals = Object.values(DAILY_PANEL_NUTRIENTS).reduce((acc, cfg) => {
+    acc[cfg.field] = 0;
+    return acc;
+  }, {});
+
+  // Helper to safely add
+  const addToTotal = (field, value) => {
+    if (typeof value !== "number" || Number.isNaN(value)) return;
+    totals[field] += value;
+  };
+
+  // 5. For each food, scale per_100g nutrients by total grams eaten
+  for (const food of foods) {
+    const foodIdStr = food._id.toString();
+    const grams = foodGramsById.get(foodIdStr) || 0;
+    if (!grams) continue;
+
+    const factor = grams / 100.0;
+    const nutrients = food.nutrients || [];
+
+    for (const nutrient of nutrients) {
+      const cfg = DAILY_PANEL_NUTRIENTS[nutrient.key];
+      if (!cfg) continue; // skip nutrients we don't care about in the panel
+
+      const per100g = nutrient.per_100g;
+      if (typeof per100g !== "number") continue;
+
+      const contribution = per100g * factor;
+      addToTotal(cfg.field, contribution);
+    }
+  }
+
+  // 6. Round totals to something sane (e.g. 1 decimal place)
+  for (const [k, v] of Object.entries(totals)) {
+    totals[k] = Math.round((v + Number.EPSILON) * 10) / 10;
+  }
+
+  // 7. Upsert into user_daily_totals
+  const now = new Date();
+  const update = {
+    $set: {
+      totals,
+      timezone: "UTC", // TODO: switch to user's tz later
+      updatedAt: now,
+    },
+    $setOnInsert: {
+      createdAt: now,
+    },
+  };
+
+  const res = await dailyTotalsCollection.updateOne(
+    { userId: userObjectId, dateKey },
+    update,
+    { upsert: true }
+  );
+
+  console.log("[recomputeDailyNutritionTotals] upsert result:", {
+    matchedCount: res.matchedCount,
+    modifiedCount: res.modifiedCount,
+    upsertedId: res.upsertedId,
+  });
 }
