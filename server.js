@@ -273,10 +273,6 @@ app.patch("/users/:id/profile", async (req, res) => {
   }
 });
 
-// server.js
-import { logUserMeal } from "./services/userMeals.js";
-
-// ...
 
 app.post("/users/:id/meals", async (req, res) => {
   try {
