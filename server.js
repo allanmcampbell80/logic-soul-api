@@ -273,20 +273,46 @@ app.patch("/users/:id/profile", async (req, res) => {
   }
 });
 
-app.post("/users/:userId/meals", async (req, res) => {
+// server.js
+import { logUserMeal } from "./services/userMeals.js";
+
+// ...
+
+app.post("/users/:id/meals", async (req, res) => {
   try {
-    const userId = req.params.userId;
-    console.log("[Users/Meals] incoming userId:", userId);
-    console.log("[Users/Meals] incoming payload:", req.body);
+    const userId = req.params.id;
 
-    const meal = await logUserMeal(userId, req.body);
+    // Expecting payload shaped roughly like:
+    // {
+    //   loggedAt: "2025-12-10T15:30:00.000Z",   // optional
+    //   timezone: "America/Toronto",            // optional
+    //   description: "Steak, cauliflower mash",
+    //   dateKey: "2025-12-10",                  // optional override
+    //   items: [
+    //     {
+    //       name: "Steak",
+    //       foodId: "69248aba5f482c9b7d709939",
+    //       quantity: 150,
+    //       quantityUnit: "g",
+    //       confidence: 0.92
+    //     },
+    //     // ...
+    //   ]
+    // }
+    const payload = req.body;
 
-    res.json({ ok: true, meal });
+    const result = await logUserMeal(userId, payload);
+
+    res.json({
+      ok: true,
+      meal: result,
+    });
   } catch (err) {
     console.error("[Users/Meals] Error:", err);
-    res
-      .status(err.statusCode || 500)
-      .json({ ok: false, error: err.message || "Failed to log meal" });
+    res.status(err.statusCode || 500).json({
+      ok: false,
+      error: err.message || "Failed to log meal",
+    });
   }
 });
 
