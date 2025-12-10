@@ -4,7 +4,7 @@ import cors from "cors";
 import { MongoClient, ServerApiVersion } from "mongodb";
 import { findBestMatchesForMealItems } from "./services/mealSearch.js";
 import { ensureUser, updateUserProfile } from "./services/users.js";
-import { logUserMeal } from "./services/userMeals.js";
+import { logUserMeal, recomputeDailyNutritionTotals } from "./services/userMeals.js";
 import { getFoodDetails } from "./services/foodDetails.js";
 
 const app = express();
@@ -297,7 +297,24 @@ app.post("/users/:id/meals", async (req, res) => {
     // }
     const payload = req.body;
 
+    // 1) Log the meal itself
     const result = await logUserMeal(userId, payload);
+
+    // 2) Kick off daily nutrition total recompute in the background.
+    //    We don't block the response on this — it's best-effort.
+    if (db && result && result.dateKey) {
+      recomputeDailyNutritionTotals(db, userId, result.dateKey).catch((err) => {
+        console.error(
+          "[Users/Meals] Failed to recompute daily nutrition totals:",
+          err
+        );
+      });
+    } else {
+      console.warn(
+        "[Users/Meals] Skipping recomputeDailyNutritionTotals — missing db or dateKey",
+        { hasDb: !!db, hasDateKey: !!(result && result.dateKey) }
+      );
+    }
 
     res.json({
       ok: true,
