@@ -130,7 +130,9 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     return;
   }
 
-  // 2. Aggregate total grams per foodId for that day
+  // 2. Aggregate total grams per foodId for that day, with a fallback to
+  // the food's serving size if the logged quantity is missing/zero or
+  // expressed in servings.
   const foodGramsById = new Map(); // foodId string -> grams
 
   for (const meal of meals) {
@@ -143,13 +145,79 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
           : item.foodId.toString();
 
       const qty = item.quantity || {};
-      const unit = qty.unit || item.quantityUnit || "g";
+      const unitRaw = qty.unit || item.quantityUnit || "g";
+      const unit = String(unitRaw).toLowerCase();
       const value = typeof qty.value === "number" ? qty.value : null;
 
-      if (!value || unit.toLowerCase() !== "g") continue;
+      let gramsToAdd = 0;
+
+      // Case 1: explicit grams
+      if (value && unit === "g") {
+        gramsToAdd = value;
+      } else {
+        // Case 2: fallback to serving size when:
+        //  - unit looks like "serving"/"servings", OR
+        //  - value is missing/zero and we still want at least one serving
+        try {
+          const food = await foodItemsCollection.findOne({
+            _id: new ObjectId(foodIdStr),
+          });
+          if (!food) continue;
+
+          let gramsPerServing = null;
+
+          // Prefer serving_info.serving_size when unit is grams
+          if (
+            food.serving_info &&
+            typeof food.serving_info.serving_size === "number"
+          ) {
+            const servingUnit = String(
+              food.serving_info.serving_size_unit || ""
+            ).toLowerCase();
+            if (
+              servingUnit === "g" ||
+              servingUnit === "gram" ||
+              servingUnit === "grams"
+            ) {
+              gramsPerServing = food.serving_info.serving_size;
+            }
+          }
+
+          // Fallback to default_portion.gram_weight if available
+          if (
+            gramsPerServing == null &&
+            food.default_portion &&
+            typeof food.default_portion.gram_weight === "number"
+          ) {
+            gramsPerServing = food.default_portion.gram_weight;
+          }
+
+          if (gramsPerServing == null) {
+            // No usable serving/portion info; skip this item
+            continue;
+          }
+
+          const looksLikeServingUnit = unit.startsWith("serv");
+          const servingsCount =
+            looksLikeServingUnit && value && value > 0 ? value : 1;
+
+          gramsToAdd = gramsPerServing * servingsCount;
+        } catch (err) {
+          console.error(
+            "[recomputeDailyNutritionTotals] failed to load food for serving fallback",
+            {
+              foodIdStr,
+              error: err?.message || err,
+            }
+          );
+          continue;
+        }
+      }
+
+      if (!gramsToAdd || Number.isNaN(gramsToAdd)) continue;
 
       const prev = foodGramsById.get(foodIdStr) || 0;
-      foodGramsById.set(foodIdStr, prev + value);
+      foodGramsById.set(foodIdStr, prev + gramsToAdd);
     }
   }
 
