@@ -1,7 +1,7 @@
 // server.js
 import express from "express";
 import cors from "cors";
-import { MongoClient, ServerApiVersion } from "mongodb";
+import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import { findBestMatchesForMealItems } from "./services/mealSearch.js";
 import { ensureUser, updateUserProfile } from "./services/users.js";
 import { logUserMeal, recomputeDailyNutritionTotals } from "./services/userMeals.js";
@@ -325,6 +325,80 @@ app.post("/users/:id/meals", async (req, res) => {
     res.status(err.statusCode || 500).json({
       ok: false,
       error: err.message || "Failed to log meal",
+    });
+  }
+});
+
+// GET /users/:id/daily-totals?dateKey=YYYY-MM-DD
+// Returns the user's daily nutrition totals from the user_daily_totals collection.
+app.get("/users/:id/daily-totals", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({
+        ok: false,
+        error: "DB not ready",
+      });
+    }
+
+    const userId = req.params.id;
+    const { dateKey } = req.query;
+
+    if (!userId) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing required path parameter ':id' (userId).",
+      });
+    }
+
+    if (!dateKey || typeof dateKey !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing or invalid required query parameter 'dateKey' (expected YYYY-MM-DD).",
+      });
+    }
+
+    // Collection lives in the same DB as everything else
+    const totalsCol = db.collection("user_daily_totals");
+
+    // Attempt to coerce userId into an ObjectId if it looks like one
+    let userIdValue = userId;
+    if (typeof userId === "string" && /^[a-fA-F0-9]{24}$/.test(userId)) {
+      try {
+        userIdValue = new ObjectId(userId);
+      } catch {
+        userIdValue = userId;
+      }
+    }
+
+    const doc = await totalsCol.findOne({
+      userId: userIdValue,
+      dateKey,
+    });
+
+    if (!doc) {
+      return res.status(404).json({
+        ok: false,
+        error: "Not found",
+        userId,
+        dateKey,
+      });
+    }
+
+    // Return a stable shape that the iOS app can consume easily
+    return res.json({
+      ok: true,
+      dateKey: doc.dateKey,
+      timezone: doc.timezone || null,
+      totals: doc.totals || {},
+      updatedAt: doc.updatedAt || null,
+      createdAt: doc.createdAt || null,
+    });
+  } catch (err) {
+    console.error("[Users/DailyTotals] Error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Failed to fetch daily nutrition totals",
+      details: err && err.message ? err.message : String(err),
     });
   }
 });
