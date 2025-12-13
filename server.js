@@ -3,7 +3,7 @@ import express from "express";
 import cors from "cors";
 import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import { findBestMatchesForMealItems } from "./services/mealSearch.js";
-import { ensureUser, updateUserProfile } from "./services/users.js";
+import { ensureUser, updateUserProfile, patchUserDailyTotals } from "./services/users.js";
 import { logUserMeal, recomputeDailyNutritionTotals } from "./services/userMeals.js";
 import { getFoodDetails } from "./services/foodDetails.js";
 
@@ -399,6 +399,30 @@ app.get("/users/:id/daily-totals", async (req, res) => {
       ok: false,
       error: "Failed to fetch daily nutrition totals",
       details: err && err.message ? err.message : String(err),
+    });
+  }
+});
+
+// PATCH /users/:id/daily-totals/checkin
+// Body: { dateKey: "YYYY-MM-DD", patch: { "checkin_mood": 6, ... }, timezone?: "America/Toronto" }
+// Merges patch keys into doc.totals.* and upserts the daily totals doc if missing.
+app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const userId = req.params.id;
+    const { dateKey, patch, timezone } = req.body || {};
+
+    const result = await patchUserDailyTotals(db, userId, dateKey, patch, timezone);
+    return res.json(result);
+  } catch (err) {
+    console.error("[Users/DailyTotals/CheckIn] Error:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err.message || "Failed to update daily check-in",
     });
   }
 });
