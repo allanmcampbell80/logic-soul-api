@@ -138,3 +138,99 @@ export async function updateUserProfile(db, userId, profile) {
 
   return mapUserDoc(result.value);
 }
+
+
+function coerceUserId(userId) {
+  // Coerce userId into an ObjectId if it looks like one
+  let userIdValue = userId;
+  if (typeof userId === "string" && /^[a-fA-F0-9]{24}$/.test(userId)) {
+    userIdValue = new ObjectId(userId);
+  }
+  return userIdValue;
+}
+
+function buildTotalsSetObject(patch) {
+  // Build a $set object like: { "totals.checkin_mood": 6, ... }
+  const setObj = {};
+
+  for (const [k, v] of Object.entries(patch || {})) {
+    if (typeof k !== "string" || !k.trim()) continue;
+
+    // Accept numbers or numeric strings; store as number.
+    let num = v;
+    if (typeof num === "string") {
+      const parsed = Number(num);
+      num = Number.isFinite(parsed) ? parsed : null;
+    }
+
+    if (typeof num !== "number" || !Number.isFinite(num)) continue;
+
+    setObj[`totals.${k}`] = num;
+  }
+
+  return setObj;
+}
+
+export async function patchUserDailyTotals(db, userId, dateKey, patch, timezone) {
+  if (!db) throw new Error("DB not ready");
+
+  if (!userId || typeof userId !== "string") {
+    const err = new Error("Missing or invalid 'userId'");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (!dateKey || typeof dateKey !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+    const err = new Error("Missing or invalid 'dateKey' (expected YYYY-MM-DD)");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+    const err = new Error("Missing or invalid 'patch' (expected object)");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const totalsCol = db.collection("user_daily_totals");
+  const userIdValue = coerceUserId(userId);
+
+  const setObj = buildTotalsSetObject(patch);
+  if (Object.keys(setObj).length === 0) {
+    const err = new Error("Patch contained no valid numeric fields");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const now = new Date();
+  setObj.updatedAt = now;
+
+  if (typeof timezone === "string" && timezone.trim()) {
+    setObj.timezone = timezone.trim();
+  }
+
+  const result = await totalsCol.updateOne(
+    { userId: userIdValue, dateKey },
+    {
+      $set: setObj,
+      $setOnInsert: {
+        createdAt: now,
+        userId: userIdValue,
+        dateKey,
+      },
+    },
+    { upsert: true }
+  );
+
+  return {
+    ok: true,
+    dateKey,
+    upsertedId: result.upsertedId || null,
+    matchedCount: result.matchedCount,
+    modifiedCount: result.modifiedCount,
+    updatedAt: now,
+  };
+}
+
+  return mapUserDoc(result.value);
+}
