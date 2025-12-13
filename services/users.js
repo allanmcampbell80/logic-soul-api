@@ -231,6 +231,3 @@ export async function patchUserDailyTotals(db, userId, dateKey, patch, timezone)
     updatedAt: now,
   };
 }
-
-  return mapUserDoc(result.value);
-}
