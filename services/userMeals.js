@@ -18,6 +18,19 @@ const DAILY_PANEL_NUTRIENTS = {
   total_sugars: { field: "sugars_g", unit: "g" },
   total_lipid_fat: { field: "fat_g", unit: "g" },
 
+  // Carbs breakdown / label-style extras (when available)
+  starch: { field: "starch_g", unit: "g" },
+  added_sugars: { field: "added_sugars_g", unit: "g" },
+  sugar_alcohol: { field: "sugar_alcohol_g", unit: "g" },
+
+  // Common sugar alcohols (some datasets expose these explicitly)
+  sorbitol: { field: "sorbitol_g", unit: "g" },
+  mannitol: { field: "mannitol_g", unit: "g" },
+  xylitol: { field: "xylitol_g", unit: "g" },
+  erythritol: { field: "erythritol_g", unit: "g" },
+  maltitol: { field: "maltitol_g", unit: "g" },
+  lactitol: { field: "lactitol_g", unit: "g" },
+
   // Fat breakdown
   fatty_acids_total_saturated: { field: "sat_fat_g", unit: "g" },
   fatty_acids_total_trans: { field: "trans_fat_g", unit: "g" },
@@ -59,7 +72,9 @@ const DAILY_PANEL_NUTRIENTS = {
   thiamin: { field: "vitamin_b1_mg", unit: "mg" },
   riboflavin: { field: "vitamin_b2_mg", unit: "mg" },
   niacin: { field: "vitamin_b3_mg", unit: "mg" },
+  pantothenic_acid: { field: "vitamin_b5_mg", unit: "mg" },
   vitamin_b_6: { field: "vitamin_b6_mg", unit: "mg" },
+  biotin: { field: "vitamin_b7_ug", unit: "µg" },
   folate_total: { field: "folate_total_ug", unit: "µg" },
   folate_dfe: { field: "folate_dfe_ug", unit: "µg" },
   folate_food: { field: "folate_food_ug", unit: "µg" },
@@ -87,11 +102,15 @@ const DAILY_PANEL_NUTRIENTS = {
   copper_cu: { field: "copper_mg", unit: "mg" },
   selenium_se: { field: "selenium_ug", unit: "µg" },
   manganese_mn: { field: "manganese_mg", unit: "mg" },
+  iodine: { field: "iodine_ug", unit: "µg" },
+  chromium_cr: { field: "chromium_ug", unit: "µg" },
 
   // Other compounds
   caffeine: { field: "caffeine_mg", unit: "mg" },
   theobromine: { field: "theobromine_mg", unit: "mg" },
   alcohol_ethyl: { field: "alcohol_g", unit: "g" },
+  fluoride_f: { field: "fluoride_mg", unit: "mg" },
+  beta_sitosterol: { field: "beta_sitosterol_mg", unit: "mg" },
 
   // Useful health-related micros
   choline_total: { field: "choline_mg", unit: "mg" },
