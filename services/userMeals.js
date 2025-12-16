@@ -7,18 +7,94 @@ import { usersCollection, userMealsCollection, foodItemsCollection } from "./mon
 
 // Nutrient keys from foods.nutrients[].key that we want to aggregate
 const DAILY_PANEL_NUTRIENTS = {
+  // Calories / energy
   energy_kcal: { field: "energy_kcal", unit: "kcal" },
+  energy_kj: { field: "energy_kj", unit: "kj" },
+
+  // Macros
   protein: { field: "protein_g", unit: "g" },
-  total_lipid_fat: { field: "fat_g", unit: "g" },
-  fatty_acids_total_saturated: { field: "sat_fat_g", unit: "g" },
-  fatty_acids_total_trans: { field: "trans_fat_g", unit: "g" },
   carbohydrate: { field: "carbs_g", unit: "g" },
   fiber: { field: "fiber_g", unit: "g" },
   total_sugars: { field: "sugars_g", unit: "g" },
+  total_lipid_fat: { field: "fat_g", unit: "g" },
+
+  // Fat breakdown
+  fatty_acids_total_saturated: { field: "sat_fat_g", unit: "g" },
+  fatty_acids_total_trans: { field: "trans_fat_g", unit: "g" },
+  fatty_acids_total_monounsaturated: { field: "mono_fat_g", unit: "g" },
+  fatty_acids_total_polyunsaturated: { field: "poly_fat_g", unit: "g" },
+
+  // Common fatty-acid details (store now; derive SCFA/MCFA/LCFA and omegas in-app later)
+  // Saturated chain lengths
+  sfa_4_0: { field: "sfa_4_0_g", unit: "g" },
+  sfa_6_0: { field: "sfa_6_0_g", unit: "g" },
+  sfa_8_0: { field: "sfa_8_0_g", unit: "g" },
+  sfa_10_0: { field: "sfa_10_0_g", unit: "g" },
+  sfa_12_0: { field: "sfa_12_0_g", unit: "g" },
+  sfa_14_0: { field: "sfa_14_0_g", unit: "g" },
+  sfa_16_0: { field: "sfa_16_0_g", unit: "g" },
+  sfa_18_0: { field: "sfa_18_0_g", unit: "g" },
+
+  // MUFAs
+  mufa_16_1: { field: "mufa_16_1_g", unit: "g" },
+  mufa_18_1: { field: "mufa_18_1_g", unit: "g" },
+  mufa_20_1: { field: "mufa_20_1_g", unit: "g" },
+  mufa_22_1: { field: "mufa_22_1_g", unit: "g" },
+
+  // PUFAs (omega families can be derived client-side)
+  pufa_18_2: { field: "pufa_18_2_g", unit: "g" }, // often LA (omega-6)
+  pufa_18_3: { field: "pufa_18_3_g", unit: "g" }, // often ALA (omega-3)
+  pufa_18_4: { field: "pufa_18_4_g", unit: "g" },
+  pufa_20_4: { field: "pufa_20_4_g", unit: "g" }, // often AA (omega-6)
+  pufa_20_5_n_3_epa: { field: "epa_g", unit: "g" },
+  pufa_22_6_n_3_dha: { field: "dha_g", unit: "g" },
+  pufa_22_5_n_3_dpa: { field: "dpa_g", unit: "g" },
+
+  // Other macro-adjacent
+  cholesterol: { field: "cholesterol_mg", unit: "mg" },
+  water: { field: "water_g", unit: "g" },
+
+  // Micros — vitamins
+  vitamin_c: { field: "vitamin_c_mg", unit: "mg" },
+  thiamin: { field: "vitamin_b1_mg", unit: "mg" },
+  riboflavin: { field: "vitamin_b2_mg", unit: "mg" },
+  niacin: { field: "vitamin_b3_mg", unit: "mg" },
+  vitamin_b_6: { field: "vitamin_b6_mg", unit: "mg" },
+  folate_total: { field: "folate_total_ug", unit: "µg" },
+  folate_dfe: { field: "folate_dfe_ug", unit: "µg" },
+  folate_food: { field: "folate_food_ug", unit: "µg" },
+  folic_acid: { field: "folic_acid_ug", unit: "µg" },
+  vitamin_b_12: { field: "vitamin_b12_ug", unit: "µg" },
+  vitamin_k_phylloquinone: { field: "vitamin_k_ug", unit: "µg" },
+  vitamin_e_alpha_tocopherol: { field: "vitamin_e_mg", unit: "mg" },
+
+  // Vitamin A is messy in USDA because the key is often reused for both IU and RAE.
+  // We only aggregate the RAE form when it appears (unit µg).
+  vitamin_a: { field: "vitamin_a_rae_ug", unit: "µg" },
+
+  // Vitamin D similarly appears as IU and µg under the same key in some datasets.
+  // Prefer µg for aggregation.
+  vitamin_d: { field: "vitamin_d_ug", unit: "µg" },
+
+  // Micros — minerals
   sodium: { field: "sodium_mg", unit: "mg" },
   potassium_k: { field: "potassium_mg", unit: "mg" },
   calcium: { field: "calcium_mg", unit: "mg" },
   iron: { field: "iron_mg", unit: "mg" },
+  magnesium_mg: { field: "magnesium_mg", unit: "mg" },
+  phosphorus_p: { field: "phosphorus_mg", unit: "mg" },
+  zinc_zn: { field: "zinc_mg", unit: "mg" },
+  copper_cu: { field: "copper_mg", unit: "mg" },
+  selenium_se: { field: "selenium_ug", unit: "µg" },
+  manganese_mn: { field: "manganese_mg", unit: "mg" },
+
+  // Other compounds
+  caffeine: { field: "caffeine_mg", unit: "mg" },
+  theobromine: { field: "theobromine_mg", unit: "mg" },
+  alcohol_ethyl: { field: "alcohol_g", unit: "g" },
+
+  // Useful health-related micros
+  choline_total: { field: "choline_mg", unit: "mg" },
 };
 
 export async function logUserMeal(userId, payload) {
@@ -275,6 +351,11 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
       const cfg = DAILY_PANEL_NUTRIENTS[nutrient.key];
       if (!cfg) continue; // skip nutrients we don't care about in the panel
 
+      // Some datasets reuse the same `key` for different units (e.g., vitamin_a IU vs RAE µg).
+      // Only aggregate when the unit matches what we expect for this panel field.
+      const unit = nutrient.unit;
+      if (cfg.unit && unit && String(unit) !== String(cfg.unit)) continue;
+
       const per100g = nutrient.per_100g;
       if (typeof per100g !== "number") continue;
 
@@ -286,6 +367,10 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
   // 6. Round totals to something sane (e.g. 1 decimal place)
   for (const [k, v] of Object.entries(totals)) {
     totals[k] = Math.round((v + Number.EPSILON) * 10) / 10;
+  }
+  // Tiny cleanup so we don't store -0
+  for (const [k, v] of Object.entries(totals)) {
+    if (Object.is(v, -0)) totals[k] = 0;
   }
 
   // 7. Upsert into user_daily_totals
