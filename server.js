@@ -232,13 +232,93 @@ async function ensureSimpleIngredientsFromParsedList(
 }
 
 // --- Express middleware ---
+
 app.use(cors());
 app.use(express.json());
+
+// --- Moderation / reporting ---
+const REPORT_REASONS = new Set([
+  "brand_wrong",
+  "wrong_food",
+  "duplicate",
+  "restaurant_misclassified",
+  "preparation_context_wrong",
+  "nutrition_data_wrong",
+  "other",
+]);
+
+function notIgnoredQuery() {
+  return { "moderation.is_ignored": { $ne: true } };
+}
 
 
 // Health check
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "LogicSoul API" });
+});
+
+// POST /api/food-items/:id/report
+// Flags a food item to be ignored until a human review.
+// Body: { reason: string, message?: string, platform?: string }
+app.post("/api/food-items/:id/report", async (req, res) => {
+  try {
+    if (!collection) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ ok: false, error: "Invalid food item id" });
+    }
+
+    const reason = String(req.body?.reason || "").trim();
+    const message = String(req.body?.message || "").trim();
+    const platform = String(req.body?.platform || "unknown").trim();
+
+    if (!REPORT_REASONS.has(reason)) {
+      return res.status(400).json({ ok: false, error: "Invalid report reason" });
+    }
+
+    if (message.length > 280) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "Message too long (280 max)" });
+    }
+
+    const now = new Date();
+
+    const update = {
+      $set: {
+        "moderation.is_ignored": true,
+        "moderation.status": "reported",
+        "moderation.reason": reason,
+        "moderation.user_message": message || null,
+        "moderation.reported_at": now,
+        "moderation.reported_by": {
+          // Auth may not be wired yet; keep null-safe.
+          user_id: req.user?.id ?? null,
+          platform,
+        },
+        updatedAt: now,
+      },
+    };
+
+    const result = await collection.updateOne(
+      { _id: new ObjectId(id) },
+      update
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ ok: false, error: "Food item not found" });
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("[FoodItems/Report] Error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "Failed to report food item" });
+  }
 });
 
 
@@ -588,6 +668,7 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
 
     // 1) Direct USDA branded match for this exact barcode (gold standard for *US* products)
     let doc = await collection.findOne({
+      ...notIgnoredQuery(),
       "source.usda_data_type": "Branded",
       $or: [
         { normalized_upc: normalized },
@@ -602,6 +683,7 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
 
     // 2) Prefer a user-submitted Canadian product (barcode+photos) if one exists
     doc = await collection.findOne({
+      ...notIgnoredQuery(),
       normalized_upc_16: normalized,
       "source.user_submitted": true,
     });
@@ -613,6 +695,7 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
 
     // 3) Fall back to an OFF/imported Canadian product
     doc = await collection.findOne({
+      ...notIgnoredQuery(),
       normalized_upc_16: normalized,
       is_canadian_product: true,
     });
@@ -624,6 +707,7 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
 
     // 4) Generic safety net: any product with matching normalized_upc or normalized_upc_16
     doc = await collection.findOne({
+      ...notIgnoredQuery(),
       $or: [
         { normalized_upc: normalized },
         { normalized_upc_16: normalized },
@@ -866,6 +950,7 @@ app.post("/foods/usda-candidates", async (req, res) => {
 
     // Base query: USDA branded products only
     const query = {
+      ...notIgnoredQuery(),
       "source.usda_data_type": "Branded",
       $text: { $search: searchString },
     };
@@ -957,6 +1042,7 @@ app.post("/foods/usda-candidates", async (req, res) => {
         //  - brand tokens must match brand fields
         //  - name tokens must match name fields
         fallbackQuery = {
+          ...notIgnoredQuery(),
           "source.usda_data_type": "Branded",
           $and: [
             { $or: brandRegexClauses },
@@ -966,18 +1052,21 @@ app.post("/foods/usda-candidates", async (req, res) => {
       } else if (brandRegexClauses.length > 0) {
         // Only brand is useful (e.g., "Campbells")
         fallbackQuery = {
+          ...notIgnoredQuery(),
           "source.usda_data_type": "Branded",
           $or: brandRegexClauses,
         };
       } else if (nameRegexClauses.length > 0) {
         // Only name is useful (no brand provided)
         fallbackQuery = {
+          ...notIgnoredQuery(),
           "source.usda_data_type": "Branded",
           $or: nameRegexClauses,
         };
       } else {
         // Nothing meaningful to search on; extremely rare, but be safe.
         fallbackQuery = {
+          ...notIgnoredQuery(),
           "source.usda_data_type": "Branded",
         };
       }
