@@ -247,8 +247,104 @@ const REPORT_REASONS = new Set([
   "other",
 ]);
 
+
 function notIgnoredQuery() {
   return { "moderation.is_ignored": { $ne: true } };
+}
+
+function safeTrimString(v) {
+  if (v == null) return "";
+  return String(v).trim();
+}
+
+function hasNonEmptyArray(v) {
+  return Array.isArray(v) && v.length > 0;
+}
+
+function isLikelyDvBoilerplate(text) {
+  const t = safeTrimString(text).toLowerCase();
+  if (!t) return false;
+  // Common Canadian %DV boilerplate in EN/FR
+  if (t.includes("5% or less is a little")) return true;
+  if (t.includes("15% or more is a lot")) return true;
+  if (t.includes("5% ou moins")) return true;
+  if (t.includes("15% ou plus")) return true;
+  return false;
+}
+
+function scoreCanadianDoc(doc) {
+  // Higher is better
+  let score = 0;
+
+  const userSubmitted = !!doc?.source?.user_submitted;
+  const sourceType = safeTrimString(doc?.source?.type);
+  const hasIngredientsParsed = hasNonEmptyArray(doc?.ingredients_parsed);
+  const ingredientsText = safeTrimString(doc?.ingredients_text);
+
+  // Strong preference: user-submitted label/OCR docs
+  if (userSubmitted) score += 100;
+  if (sourceType === "gpt_ocr_label") score += 50;
+
+  // Prefer richer ingredient coverage
+  if (hasIngredientsParsed) score += 30;
+  if (ingredientsText.length > 0) score += 10;
+
+  // Penalize DV boilerplate if it leaked into ingredients_text
+  if (ingredientsText.length > 0 && isLikelyDvBoilerplate(ingredientsText)) score -= 20;
+
+  // If it looks like an OFF/import doc, keep it as a fallback choice
+  if (doc?.is_canadian_product) score += 5;
+
+  // Prefer newest updates slightly
+  const updatedAt = doc?.updatedAt ? new Date(doc.updatedAt).getTime() : 0;
+  const createdAt = doc?.createdAt ? new Date(doc.createdAt).getTime() : 0;
+  const ts = Math.max(updatedAt || 0, createdAt || 0);
+  if (ts > 0) {
+    // Add a small, bounded bonus for recency (0..10)
+    const daysAgo = Math.max(0, (Date.now() - ts) / (1000 * 60 * 60 * 24));
+    const recencyBonus = Math.max(0, 10 - Math.min(10, Math.floor(daysAgo / 7)));
+    score += recencyBonus;
+  }
+
+  return score;
+}
+
+async function chooseBestCanadianDocForUPC(normalizedUPC16) {
+  if (!collection) return null;
+
+  // Pull all candidate docs for this UPC (excluding USDA branded)
+  const docs = await collection
+    .find({
+      ...notIgnoredQuery(),
+      normalized_upc_16: normalizedUPC16,
+      $or: [
+        { "source.usda_data_type": { $exists: false } },
+        { "source.usda_data_type": { $ne: "Branded" } },
+      ],
+    })
+    .limit(25)
+    .toArray();
+
+  if (!docs || docs.length === 0) return null;
+
+  // Rank using score; tie-break by newest timestamp
+  docs.sort((a, b) => {
+    const sa = scoreCanadianDoc(a);
+    const sb = scoreCanadianDoc(b);
+    if (sb !== sa) return sb - sa;
+
+    const ta = Math.max(
+      a?.updatedAt ? new Date(a.updatedAt).getTime() : 0,
+      a?.createdAt ? new Date(a.createdAt).getTime() : 0
+    );
+    const tb = Math.max(
+      b?.updatedAt ? new Date(b.updatedAt).getTime() : 0,
+      b?.createdAt ? new Date(b.createdAt).getTime() : 0
+    );
+    return (tb || 0) - (ta || 0);
+  });
+
+  return docs[0];
 }
 
 
@@ -681,27 +777,22 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
       return res.json(doc);
     }
 
-    // 2) Prefer a user-submitted Canadian product (barcode+photos) if one exists
-    doc = await collection.findOne({
-      ...notIgnoredQuery(),
-      normalized_upc_16: normalized,
-      "source.user_submitted": true,
-    });
+    // 2) Prefer the *best* Canadian doc for this UPC:
+    //    - user-submitted OCR/label docs first (richer + cleaned)
+    //    - then OFF/import Canadian docs
+    //    This ensures the client sees the best-available representation.
+    doc = await chooseBestCanadianDocForUPC(normalized);
 
     if (doc) {
-      console.log("[API] Lookup result: USER-SUBMITTED Canadian product for barcode", normalized);
-      return res.json(doc);
-    }
+      const userSubmitted = !!doc?.source?.user_submitted;
+      const sourceType = doc?.source?.type || "";
+      const tag = userSubmitted
+        ? `USER-SUBMITTED (${sourceType || "unknown"})`
+        : doc?.is_canadian_product
+          ? "OFF/Canadian"
+          : "Canadian (other)";
 
-    // 3) Fall back to an OFF/imported Canadian product
-    doc = await collection.findOne({
-      ...notIgnoredQuery(),
-      normalized_upc_16: normalized,
-      is_canadian_product: true,
-    });
-
-    if (doc) {
-      console.log("[API] Lookup result: OFF/Canadian product for barcode", normalized);
+      console.log("[API] Lookup result:", tag, "product for barcode", normalized, "_id:", doc._id);
       return res.json(doc);
     }
 
