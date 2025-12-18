@@ -70,6 +70,9 @@ function scoreCandidate(canonicalWords, candidate) {
 function normalizeText(s) {
   return (s || "")
     .toLowerCase()
+    // preserve common nutrition shorthand
+    .replace(/%/g, " percent ")
+    .replace(/\b(\d+)\s*(?:pct)\b/g, "$1 percent")
     .replace(/[^a-z0-9\s]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -81,7 +84,7 @@ const STOPWORDS = new Set([
   "on", "at", "from", "by", "as", "is", "it", "this", "that",
   "cup", "cups", "tbsp", "tsp", "tablespoon", "tablespoons", "teaspoon", "teaspoons",
   "g", "gram", "grams", "kg", "oz", "ounce", "ounces", "lb", "lbs", "pound", "pounds",
-  "ml", "l", "liter", "litre", "liters", "litres",
+  "ml", "liter", "litre", "liters", "litres",
   "slice", "slices", "piece", "pieces", "serving", "servings",
   "small", "medium", "large",
   "fresh", "frozen", "cooked", "raw"
@@ -90,14 +93,78 @@ const STOPWORDS = new Set([
 function tokenizeMealPhrase(phrase) {
   const txt = normalizeText(phrase);
   if (!txt) return [];
-  return txt
-    .split(" ")
-    .filter(Boolean)
-    // drop pure numbers and stopwords
-    .filter((w) => !/^\d+$/.test(w))
-    .filter((w) => !STOPWORDS.has(w))
-    // avoid super-short noise
-    .filter((w) => w.length >= 2);
+
+  const parts = txt.split(" ").filter(Boolean);
+  const kept = [];
+
+  for (let i = 0; i < parts.length; i++) {
+    const w = parts[i];
+    const prev = i > 0 ? parts[i - 1] : "";
+    const next = i + 1 < parts.length ? parts[i + 1] : "";
+
+    // Keep numbers only if they are tied to a percent phrase: "2 percent"
+    const isPureNumber = /^\d+$/.test(w);
+    const isPercentNumber = isPureNumber && (next === "percent" || prev === "percent");
+
+    if (isPureNumber && !isPercentNumber) continue;
+    if (STOPWORDS.has(w)) continue;
+    if (w.length < 2 && !isPureNumber) continue;
+
+    kept.push(w);
+  }
+
+  return kept;
+}
+
+function labelBoost(label) {
+  // Earlier stages should win ties.
+  switch (label) {
+    case "common-name-exact": return 3.0;
+    case "common-name-phrase": return 2.0;
+    case "alt-name-exact": return 1.5;
+    case "product-primary": return 1.0;
+    case "ingredient-primary": return 1.0;
+    case "product-fallback": return 0.5;
+    case "ingredient-fallback": return 0.5;
+    case "single-word": return 0.0;
+    default: return 0.0;
+  }
+}
+
+function buildSingleWordOr(singleWordRegexes) {
+  const ors = [];
+
+  const stringFields = [
+    "normalized_name",
+    "name",
+    "common_name",
+    "normalized_common_name",
+    "display_product_name",
+    "brand.name",
+    "brand.owner",
+    "names_enrichment_v2.brand_name",
+    "names_enrichment_v2.product_name",
+    "names_enrichment_v2.common_name",
+    "ingredients_text"
+  ];
+
+  const arrayFields = [
+    "alt_names",
+    "normalized_alt_names",
+    "names_enrichment_v2.alt_names"
+  ];
+
+  for (const re of singleWordRegexes) {
+    for (const f of stringFields) {
+      ors.push({ [f]: re });
+    }
+    for (const f of arrayFields) {
+      // For array fields, regex match against any element
+      ors.push({ [f]: re });
+    }
+  }
+
+  return ors;
 }
 
 export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) {
@@ -119,8 +186,17 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
     const fallbackWords = normalizeText(canonical).split(/\s+/).filter(Boolean);
     const finalWords = words.length ? words : fallbackWords;
 
-    // Build a lenient regex: "kelloggs rice krispies" -> /kelloggs.*rice.*krispies/i
-    const regex = new RegExp(finalWords.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*"), "i");
+    const canonicalNorm = normalizeText(canonical);
+    const exactNormRegex = new RegExp(`^${canonicalNorm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+
+    // Build a lenient regex: "kelloggs rice krispies" -> /\bkelloggs\b.*\brice\b.*\bkrispies\b/i
+    const regex = new RegExp(
+      finalWords
+        .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        .map((w) => `\\b${w}\\b`)
+        .join(".*"),
+      "i"
+    );
     const singleWordRegexes = finalWords
       .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
       .map((w) => new RegExp(`\\b${w}\\b`, "i"));
@@ -131,6 +207,37 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
 
     const queries = [];
 
+    // 0) Best signal first: common_name / normalized_common_name exact matches
+    queries.push({
+      filter: {
+        $or: [
+          { normalized_common_name: canonicalNorm },
+          { "names_enrichment_v2.common_name": canonicalNorm },
+          { common_name: exactNormRegex },
+          { "names_enrichment_v2.common_name": exactNormRegex },
+          { normalized_alt_names: canonicalNorm },
+          { "names_enrichment_v2.alt_names": exactNormRegex },
+          { alt_names: exactNormRegex }
+        ]
+      },
+      label: "common-name-exact"
+    });
+
+    // 0b) Next best: common_name phrase match with boundaries
+    queries.push({
+      filter: {
+        $or: [
+          { normalized_common_name: regex },
+          { common_name: regex },
+          { "names_enrichment_v2.common_name": regex },
+          { normalized_alt_names: regex },
+          { alt_names: regex },
+          { "names_enrichment_v2.alt_names": regex }
+        ]
+      },
+      label: "common-name-phrase"
+    });
+
     if (isProductPreferred) {
       // 1) Packaged products focus
       queries.push({
@@ -138,18 +245,12 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
           food_type: "packaged_product",
           $or: [
             { normalized_name: regex },
-            { normalized_common_name: regex },
-            { common_name: regex },
             { display_product_name: regex },
-            { alt_names: regex },
-            { normalized_alt_names: regex },
             { name: regex },
             { "brand.name": regex },
             { "brand.owner": regex },
             { "names_enrichment_v2.brand_name": regex },
             { "names_enrichment_v2.product_name": regex },
-            { "names_enrichment_v2.common_name": regex },
-            { "names_enrichment_v2.alt_names": regex },
             { ingredients_text: regex }
           ]
         },
@@ -169,16 +270,10 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
             {
               $or: [
                 { normalized_name: regex },
-                { normalized_common_name: regex },
-                { common_name: regex },
                 { display_product_name: regex },
                 { name: regex },
-                { alt_names: regex },
-                { normalized_alt_names: regex },
                 { "names_enrichment_v2.brand_name": regex },
                 { "names_enrichment_v2.product_name": regex },
-                { "names_enrichment_v2.common_name": regex },
-                { "names_enrichment_v2.alt_names": regex },
                 { ingredients_text: regex }
               ]
             }
@@ -200,16 +295,10 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
             {
               $or: [
                 { normalized_name: regex },
-                { normalized_common_name: regex },
-                { common_name: regex },
                 { display_product_name: regex },
                 { name: regex },
-                { alt_names: regex },
-                { normalized_alt_names: regex },
                 { "names_enrichment_v2.brand_name": regex },
                 { "names_enrichment_v2.product_name": regex },
-                { "names_enrichment_v2.common_name": regex },
-                { "names_enrichment_v2.alt_names": regex },
                 { ingredients_text: regex }
               ]
             }
@@ -223,18 +312,12 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
           food_type: "packaged_product",
           $or: [
             { normalized_name: regex },
-            { normalized_common_name: regex },
-            { common_name: regex },
             { display_product_name: regex },
-            { alt_names: regex },
-            { normalized_alt_names: regex },
             { name: regex },
             { "brand.name": regex },
             { "brand.owner": regex },
             { "names_enrichment_v2.brand_name": regex },
             { "names_enrichment_v2.product_name": regex },
-            { "names_enrichment_v2.common_name": regex },
-            { "names_enrichment_v2.alt_names": regex },
             { ingredients_text: regex }
           ]
         },
@@ -245,22 +328,7 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
     // 3) Single-word fallback (VERY broad; limit hard)
     queries.push({
       filter: {
-        $or: [
-          { normalized_name: { $in: singleWordRegexes } },
-          { normalized_common_name: { $in: singleWordRegexes } },
-          { common_name: { $in: singleWordRegexes } },
-          { display_product_name: { $in: singleWordRegexes } },
-          { name: { $in: singleWordRegexes } },
-          { alt_names: { $in: singleWordRegexes } },
-          { normalized_alt_names: { $in: singleWordRegexes } },
-          { "brand.name": { $in: singleWordRegexes } },
-          { "brand.owner": { $in: singleWordRegexes } },
-          { "names_enrichment_v2.brand_name": { $in: singleWordRegexes } },
-          { "names_enrichment_v2.product_name": { $in: singleWordRegexes } },
-          { "names_enrichment_v2.common_name": { $in: singleWordRegexes } },
-          { "names_enrichment_v2.alt_names": { $in: singleWordRegexes } },
-          { ingredients_text: { $in: singleWordRegexes } }
-        ]
+        $or: buildSingleWordOr(singleWordRegexes)
       },
       label: "single-word"
     });
@@ -271,7 +339,7 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
       const cursor = foodItems.find(q.filter).limit(40); // keep it reasonable
       const batch = await cursor.toArray();
       for (const doc of batch) {
-        const score = scoreCandidate(finalWords, doc);
+        const score = scoreCandidate(finalWords, doc) + labelBoost(q.label);
         if (score > 0) {
           candidates.push({
             label: q.label,
@@ -303,7 +371,7 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
         is_restaurant_item: Boolean(c.doc.is_restaurant_item || (c.doc.names_enrichment_v2 && c.doc.names_enrichment_v2.is_restaurant_item)),
         restaurant_chain: c.doc.restaurant_chain || null,
         brand: c.doc.brand || null,
-        food_type: c.doc.food_type || (c.doc.is_simple_ingredient ? "ingredient" : null),
+        food_type: c.doc.food_type || null,
         label: c.label,
         score: c.score
       }))
