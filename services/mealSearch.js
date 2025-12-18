@@ -263,7 +263,7 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
           $and: [
             {
               $or: [
-                { food_type: "ingredient" },
+                { food_type: { $in: ["ingredient", "prepared_dish"] } },
                 { is_simple_ingredient: true }
               ]
             },
@@ -288,7 +288,7 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
           $and: [
             {
               $or: [
-                { food_type: "ingredient" },
+                { food_type: { $in: ["ingredient", "prepared_dish"] } },
                 { is_simple_ingredient: true }
               ]
             },
@@ -333,25 +333,33 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
       label: "single-word"
     });
 
-    const candidates = [];
+    // Dedupe across query stages; keep the best-scoring entry per document.
+    const candidatesById = new Map();
 
     for (const q of queries) {
       const cursor = foodItems.find(q.filter).limit(40); // keep it reasonable
       const batch = await cursor.toArray();
       for (const doc of batch) {
         const score = scoreCandidate(finalWords, doc) + labelBoost(q.label);
-        if (score > 0) {
-          candidates.push({
-            label: q.label,
-            score,
-            doc
-          });
+        if (score <= 0) continue;
+
+        const id = String(doc._id);
+        const existing = candidatesById.get(id);
+
+        // Keep the highest score; if tied, prefer the earlier-stage label via labelBoost.
+        if (!existing || score > existing.score || (score === existing.score && labelBoost(q.label) > labelBoost(existing.label))) {
+          candidatesById.set(id, { label: q.label, score, doc });
         }
       }
     }
 
-    // Sort by score desc, then maybe prefer label ordering
-    candidates.sort((a, b) => b.score - a.score);
+    const candidates = Array.from(candidatesById.values());
+
+    // Sort by score desc; if tied, prefer earlier-stage labels.
+    candidates.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return labelBoost(b.label) - labelBoost(a.label);
+    });
 
     const top = candidates.slice(0, maxPerItem);
 
