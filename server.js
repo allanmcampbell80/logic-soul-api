@@ -4,7 +4,7 @@ import cors from "cors";
 import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import { findBestMatchesForMealItems } from "./services/mealSearch.js";
 import { ensureUser, updateUserProfile, patchUserDailyTotals } from "./services/users.js";
-import { logUserMeal, recomputeDailyNutritionTotals } from "./services/userMeals.js";
+import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, deleteUserMeal,} from "./services/userMeals.js";
 import { getFoodDetails } from "./services/foodDetails.js";
 
 const app = express();
@@ -501,6 +501,90 @@ app.post("/users/:id/meals", async (req, res) => {
     res.status(err.statusCode || 500).json({
       ok: false,
       error: err.message || "Failed to log meal",
+    });
+  }
+});
+
+// GET /users/:id/meals?dateKey=YYYY-MM-DD
+// Returns the user's meals for a given day (sorted by time).
+app.get("/users/:id/meals", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const userId = req.params.id;
+    const { dateKey } = req.query;
+
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "Missing required path parameter ':id' (userId)." });
+    }
+
+    if (!dateKey || typeof dateKey !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing or invalid required query parameter 'dateKey' (expected YYYY-MM-DD).",
+      });
+    }
+
+    const items = await getUserMealsForDate(db, userId, dateKey);
+
+    return res.json({
+      ok: true,
+      dateKey,
+      count: Array.isArray(items) ? items.length : 0,
+      items: items || [],
+    });
+  } catch (err) {
+    console.error("[Users/Meals/List] Error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Failed to fetch meals for date",
+      details: err && err.message ? err.message : String(err),
+    });
+  }
+});
+
+// DELETE /users/:id/meals/:mealId
+// Deletes a single logged meal and recomputes that day's totals.
+app.delete("/users/:id/meals/:mealId", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const userId = req.params.id;
+    const { mealId } = req.params;
+
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "Missing required path parameter ':id' (userId)." });
+    }
+
+    if (!mealId || typeof mealId !== "string" || !ObjectId.isValid(mealId)) {
+      return res.status(400).json({ ok: false, error: "Missing or invalid ':mealId' (expected Mongo ObjectId)." });
+    }
+
+    const result = await deleteUserMeal(db, userId, mealId);
+
+    if (!result || result.ok === false) {
+      const msg = result && result.error ? result.error : "Failed to delete meal";
+      const status = result && typeof result.statusCode === "number" ? result.statusCode : 500;
+      return res.status(status).json({ ok: false, error: msg });
+    }
+
+    // Service should return dateKey so the client can refresh that day's list/totals.
+    return res.json({
+      ok: true,
+      mealId,
+      dateKey: result.dateKey || null,
+      deletedCount: result.deletedCount ?? 1,
+    });
+  } catch (err) {
+    console.error("[Users/Meals/Delete] Error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Failed to delete meal",
+      details: err && err.message ? err.message : String(err),
     });
   }
 });
