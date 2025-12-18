@@ -517,7 +517,10 @@ app.get("/users/:id/meals", async (req, res) => {
     const { dateKey } = req.query;
 
     if (!userId) {
-      return res.status(400).json({ ok: false, error: "Missing required path parameter ':id' (userId)." });
+      return res.status(400).json({
+        ok: false,
+        error: "Missing required path parameter ':id' (userId).",
+      });
     }
 
     if (!dateKey || typeof dateKey !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
@@ -527,13 +530,37 @@ app.get("/users/:id/meals", async (req, res) => {
       });
     }
 
-    const items = await getUserMealsForDate(db, userId, dateKey);
+    // IMPORTANT:
+    // In Mongo, userId may be stored as an ObjectId (newer docs) OR a string (older docs).
+    // Query both so the API returns meals regardless of storage type.
+    const userIdFilters = [{ userId: userId }];
+    if (typeof userId === "string" && /^[a-fA-F0-9]{24}$/.test(userId)) {
+      try {
+        userIdFilters.push({ userId: new ObjectId(userId) });
+      } catch {
+        // ignore
+      }
+    }
 
+    const mealsCol = db.collection("user_meals");
+
+    const items = await mealsCol
+      .find({
+        $and: [
+          { $or: userIdFilters },
+          { dateKey },
+        ],
+      })
+      .sort({ loggedAt: -1 })
+      .toArray();
+
+    // Return a stable shape, plus a `meals` alias for client compatibility.
     return res.json({
       ok: true,
       dateKey,
       count: Array.isArray(items) ? items.length : 0,
       items: items || [],
+      meals: items || [],
     });
   } catch (err) {
     console.error("[Users/Meals/List] Error:", err);
@@ -564,7 +591,19 @@ app.delete("/users/:id/meals/:mealId", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Missing or invalid ':mealId' (expected Mongo ObjectId)." });
     }
 
-    const result = await deleteUserMeal(db, userId, mealId);
+    // NOTE:
+    // user_meals.userId may be stored as ObjectId or string. The service layer
+    // may query by exact type, so we pass an ObjectId when possible.
+    let userIdForDelete = userId;
+    if (typeof userId === "string" && /^[a-fA-F0-9]{24}$/.test(userId)) {
+      try {
+        userIdForDelete = new ObjectId(userId);
+      } catch {
+        userIdForDelete = userId;
+      }
+    }
+
+    const result = await deleteUserMeal(db, userIdForDelete, mealId);
 
     if (!result || result.ok === false) {
       const msg = result && result.error ? result.error : "Failed to delete meal";
