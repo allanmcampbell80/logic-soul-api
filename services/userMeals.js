@@ -417,3 +417,169 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     upsertedId: res.upsertedId,
   });
 }
+
+
+function normalizeDateKey(dateKey) {
+  // Expect YYYY-MM-DD
+  if (!dateKey || typeof dateKey !== "string") return null;
+  const trimmed = dateKey.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return null;
+  return trimmed;
+}
+
+function safeString(v) {
+  return typeof v === "string" && v.trim() ? v.trim() : null;
+}
+
+function mapUserMealDoc(doc) {
+  if (!doc) return null;
+
+  // Prefer "humanized" names if present (your pipeline sets common_name / display_product_name)
+  const commonName =
+    safeString(doc.common_name) ||
+    safeString(doc.display_product_name) ||
+    safeString(doc.name) ||
+    safeString(doc.canonicalName) ||
+    safeString(doc.canonical_name) ||
+    safeString(doc.originalPhrase) ||
+    safeString(doc.original_phrase) ||
+    "Unknown item";
+
+  return {
+    id: doc._id?.toString?.() ?? null,
+    dateKey: safeString(doc.dateKey) || null,
+    loggedAt: doc.loggedAt || null,
+    common_name: commonName,
+
+    // Pass-through fields that help the UI show the “category” context
+    kind: safeString(doc.kind) || null,
+    is_simple_ingredient:
+      typeof doc.is_simple_ingredient === "boolean"
+        ? doc.is_simple_ingredient
+        : null,
+    preparation_context: safeString(doc.preparation_context) || null,
+    is_restaurant_item:
+      typeof doc.is_restaurant_item === "boolean"
+        ? doc.is_restaurant_item
+        : null,
+    restaurant_chain: safeString(doc.restaurant_chain) || null,
+
+    // Quantity (shape from MealParser output)
+    quantity:
+      doc.quantity && typeof doc.quantity === "object"
+        ? {
+            value: typeof doc.quantity.value === "number" ? doc.quantity.value : null,
+            unit: safeString(doc.quantity.unit) || null,
+            isEstimate:
+              typeof doc.quantity.isEstimate === "boolean"
+                ? doc.quantity.isEstimate
+                : null,
+            basis: safeString(doc.quantity.basis) || null,
+            confidence:
+              typeof doc.quantity.confidence === "number"
+                ? doc.quantity.confidence
+                : null,
+          }
+        : null,
+
+    // Useful for debugging / future work
+    food_item_id:
+      safeString(doc.food_item_id) || safeString(doc.foodItemId) || null,
+  };
+}
+
+/**
+ * Fetch user_meals rows for a given user + dateKey (YYYY-MM-DD)
+ * Used by DailyMealView.swift.
+ */
+export async function getUserMealsForDate(db, userId, dateKey, opts = {}) {
+  if (!db) throw new Error("DB not ready");
+
+  if (!ObjectId.isValid(userId)) {
+    const err = new Error("Invalid userId");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const normalizedDateKey = normalizeDateKey(dateKey);
+  if (!normalizedDateKey) {
+    const err = new Error("Missing or invalid 'dateKey' (expected YYYY-MM-DD)");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const limit = Number.isFinite(Number(opts.limit))
+    ? Math.max(1, Math.min(500, Number(opts.limit)))
+    : 200;
+
+  const userObjectId = new ObjectId(userId);
+
+  // NOTE: Some older docs might not have loggedAt; createdAt fallback keeps ordering sane.
+  const docs = await userMealsCollection
+    .find({ userId: userObjectId, dateKey: normalizedDateKey })
+    .sort({ loggedAt: 1, createdAt: 1, _id: 1 })
+    .limit(limit)
+    .toArray();
+
+  return {
+    ok: true,
+    dateKey: normalizedDateKey,
+    count: docs.length,
+    meals: docs.map(mapUserMealDoc).filter(Boolean),
+  };
+}
+
+/**
+ * Delete a single user_meals row by id.
+ * For now we also recompute daily totals for that meal's dateKey so the rings update correctly.
+ */
+export async function deleteUserMeal(db, userId, mealId) {
+  if (!db) throw new Error("DB not ready");
+
+  if (!ObjectId.isValid(userId)) {
+    const err = new Error("Invalid userId");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (!mealId || typeof mealId !== "string" || !ObjectId.isValid(mealId)) {
+    const err = new Error("Missing or invalid 'mealId'");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const userObjectId = new ObjectId(userId);
+  const mealObjectId = new ObjectId(mealId);
+
+  // Load the meal first so we know which day to recompute.
+  const existing = await userMealsCollection.findOne({
+    _id: mealObjectId,
+    userId: userObjectId,
+  });
+
+  if (!existing) {
+    return { ok: true, deletedCount: 0 };
+  }
+
+  const dateKey = safeString(existing.dateKey);
+
+  const result = await userMealsCollection.deleteOne({
+    _id: mealObjectId,
+    userId: userObjectId,
+  });
+
+  // Keep the daily rings / totals in sync
+  if (dateKey) {
+    try {
+      await recomputeDailyNutritionTotals(db, userId, dateKey);
+    } catch (e) {
+      console.error("[deleteUserMeal] recompute failed", e?.message || e);
+    }
+  }
+
+  return {
+    ok: true,
+    deletedCount: result.deletedCount ?? 0,
+    dateKey: dateKey || null,
+  };
+}
