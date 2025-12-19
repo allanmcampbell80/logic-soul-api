@@ -947,15 +947,14 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
   }
 });
 
-// GET /foods/details?ids=... → fetch FULL food docs for one or more food IDs
+// GET /foods/details?ids=... → fetch nutrient/details for one or more food IDs
 // Usage examples:
 //   /foods/details?ids=69249d5d5f482c9b7d71626e
-//   /foods/details?ids=69249d5d5d5f482c9b7d71626e,6924a05a5f482c9b7d71923f
+//   /foods/details?ids=69249d5d5f482c9b7d71626e,6924a05a5f482c9b7d71923f
 //   /foods/details?ids=id1&ids=id2&ids=id3
 app.get("/foods/details", async (req, res) => {
   try {
-    // Use the foods collection directly; this route is expected to return the full document.
-    if (!collection) {
+    if (!db) {
       return res.status(500).json({
         ok: false,
         error: "DB not ready",
@@ -995,42 +994,14 @@ app.get("/foods/details", async (req, res) => {
       });
     }
 
-    // Validate + coerce to ObjectId
-    const objectIds = [];
-    const invalidIds = [];
+    console.log("[FoodDetails] Incoming ids:", ids);
 
-    for (const id of ids) {
-      if (ObjectId.isValid(id)) {
-        objectIds.push(new ObjectId(id));
-      } else {
-        invalidIds.push(id);
-      }
-    }
-
-    if (!objectIds.length) {
-      return res.status(400).json({
-        ok: false,
-        error: "No valid MongoDB ObjectIds provided in 'ids'.",
-        invalidIds,
-      });
-    }
-
-    // Fetch full docs (no projection)
-    const docs = await collection
-      .find({ _id: { $in: objectIds } })
-      .toArray();
-
-    // Return docs in the same order as the input ids
-    const byId = new Map((docs || []).map((d) => [String(d._id), d]));
-    const ordered = ids
-      .map((id) => (ObjectId.isValid(id) ? byId.get(String(id)) : null))
-      .filter(Boolean);
+    const items = await getFoodDetails(db, ids);
 
     return res.json({
       ok: true,
-      count: ordered.length,
-      items: ordered,
-      invalidIds: invalidIds.length ? invalidIds : undefined,
+      count: Array.isArray(items) ? items.length : 0,
+      items: items || [],
     });
   } catch (err) {
     console.error("[FoodDetails] Error:", err);
