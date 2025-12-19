@@ -947,6 +947,40 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
   }
 });
 
+// GET /food-items/:id → fetch a single food_item by ObjectId (raw, unchanged)
+app.get("/food-items/:id", async (req, res) => {
+  try {
+    if (!collection) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const { id } = req.params;
+
+    if (!id || !ObjectId.isValid(id)) {
+      return res.status(400).json({ ok: false, error: "Invalid ObjectId" });
+    }
+
+    const item = await collection.findOne({ _id: new ObjectId(id) });
+
+    if (!item) {
+      return res.status(404).json({ ok: false, error: "Food item not found" });
+    }
+
+    // IMPORTANT: return the document completely unchanged
+    return res.json({
+      ok: true,
+      item,
+    });
+  } catch (err) {
+    console.error("[FoodItems/GetById] Error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Failed to fetch food item",
+      details: err && err.message ? err.message : String(err),
+    });
+  }
+});
+
 // GET /foods/details?ids=... → fetch nutrient/details for one or more food IDs
 // Usage examples:
 //   /foods/details?ids=69249d5d5f482c9b7d71626e
