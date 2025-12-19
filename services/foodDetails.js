@@ -1,5 +1,6 @@
 // services/foodDetails.js
 import { ObjectId } from "mongodb";
+import { foodItemsCollection } from "./mongo.js";
 
 /**
  * Fetch details for one or more foods by Mongo _id.
@@ -67,7 +68,7 @@ export async function getFoodDetails(db, ids) {
     }));
 
     return {
-      id: doc._id,
+      id: String(doc._id),
       name: doc.name || doc.normalized_name || null,
       normalizedName: doc.normalized_name || null,
       category: doc.category || null,
