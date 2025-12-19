@@ -102,3 +102,5 @@ export async function getFoodDetails(db, ids) {
 
   return items;
 }
+  return items;
+}
