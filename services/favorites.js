@@ -1,5 +1,3 @@
-
-
 // services/favorites.js
 //
 // Shape:
@@ -65,8 +63,8 @@ async function addUserFavoriteByDeviceId(db, { deviceId, foodId, commonName, bra
     addedAt: new Date(),
   };
 
-  // Ensure the user exists.
-  const ensureUserRes = await db.collection("users").updateOne(
+  // Ensure the user exists and get the user's _id in one round trip.
+  const ensureUserRes = await db.collection("users").findOneAndUpdate(
     { deviceId },
     {
       $setOnInsert: {
@@ -77,21 +75,45 @@ async function addUserFavoriteByDeviceId(db, { deviceId, foodId, commonName, bra
         lastSeenAt: new Date(),
       },
     },
-    { upsert: true }
+    {
+      upsert: true,
+      returnDocument: "after",
+      projection: { _id: 1, deviceId: 1 },
+    }
   );
 
-  const userId = ensureUserRes.upsertedId
-    ? ensureUserRes.upsertedId._id
-    : (await db.collection("users").findOne({ deviceId }, { projection: { _id: 1 } }))?._id;
+  const userId = ensureUserRes?.value?._id || null;
+  if (!userId) throw new Error("Failed to resolve userId for deviceId");
 
-  // De-dupe: remove any existing entry with same foodId, then push the new one.
+  // Atomic de-dupe + append using a pipeline update (avoids $pull+$push path conflicts).
   await db.collection("users").updateOne(
-    { deviceId },
-    {
-      $pull: { favorites: { foodId: foodObjectId } },
-      $push: { favorites: favoriteDoc },
-      $set: { lastSeenAt: new Date() },
-    }
+    { _id: userId },
+    [
+      {
+        $set: {
+          favorites: {
+            $let: {
+              vars: {
+                existing: { $ifNull: ["$favorites", []] },
+              },
+              in: {
+                $concatArrays: [
+                  {
+                    $filter: {
+                      input: "$$existing",
+                      as: "f",
+                      cond: { $ne: ["$$f.foodId", foodObjectId] },
+                    },
+                  },
+                  [favoriteDoc],
+                ],
+              },
+            },
+          },
+          lastSeenAt: new Date(),
+        },
+      },
+    ]
   );
 
   return {
