@@ -427,22 +427,41 @@ app.post("/api/food-items/:id/report", async (req, res) => {
 //-------------------------------------------------------------------------------------------------------
 // Favorites
 
-// GET /favorites?deviceId=...  → returns the user's favorites list
-app.get("/favorites", async (req, res) => {
+// Helper: resolve a user's deviceId from a userId (Mongo _id)
+async function getDeviceIdForUserId(db, userId) {
+  if (!db) return null;
+  if (!userId || typeof userId !== "string" || !ObjectId.isValid(userId)) return null;
+
+  const usersCol = db.collection("users");
+  const user = await usersCol.findOne(
+    { _id: new ObjectId(userId) },
+    { projection: { deviceId: 1 } }
+  );
+
+  return user && user.deviceId ? String(user.deviceId).trim() : null;
+}
+
+// GET /users/:id/favorites  → returns the user's favorites list (by userId)
+app.get("/users/:id/favorites", async (req, res) => {
   try {
     if (!db) {
       return res.status(500).json({ ok: false, error: "DB not ready" });
     }
 
-    const deviceId = String(req.query?.deviceId || "").trim();
+    const userId = String(req.params?.id || "").trim();
+    const deviceId = await getDeviceIdForUserId(db, userId);
+
     if (!deviceId) {
-      return res.status(400).json({ ok: false, error: "Missing required query parameter 'deviceId'." });
+      return res.status(400).json({
+        ok: false,
+        error: "Missing or invalid ':id' (userId), or user has no deviceId.",
+      });
     }
 
     const favorites = await getUserFavoritesByDeviceId(db, deviceId);
-    return res.json({ ok: true, deviceId, favorites: favorites || [] });
+    return res.json({ ok: true, userId, deviceId, favorites: favorites || [] });
   } catch (err) {
-    console.error("[Favorites/List] Error:", err);
+    console.error("[Favorites/ListByUserId] Error:", err);
     const status = err?.statusCode || 500;
     return res.status(status).json({
       ok: false,
@@ -451,26 +470,35 @@ app.get("/favorites", async (req, res) => {
   }
 });
 
-//----------------------------------------------------------------------------------------------------------------
-
-// POST /favorites/add  → adds a favorite to the user's profile
-// Body: { deviceId, foodId, commonName?, brandName? }
-app.post("/favorites/add", async (req, res) => {
+// POST /users/:id/favorites/add  → adds a favorite to the user's profile (by userId)
+// Body: { foodId, commonName?, brandName? }
+app.post("/users/:id/favorites/add", async (req, res) => {
   try {
     if (!db) {
       return res.status(500).json({ ok: false, error: "DB not ready" });
     }
 
-    const deviceId = String(req.body?.deviceId || "").trim();
+    const userId = String(req.params?.id || "").trim();
+    const deviceId = await getDeviceIdForUserId(db, userId);
+
     const foodId = String(req.body?.foodId || "").trim();
-    const commonName = req.body?.commonName != null ? String(req.body.commonName).trim() : null;
-    const brandName = req.body?.brandName != null ? String(req.body.brandName).trim() : null;
+    const commonName =
+      req.body?.commonName != null ? String(req.body.commonName).trim() : null;
+    const brandName =
+      req.body?.brandName != null ? String(req.body.brandName).trim() : null;
 
     if (!deviceId) {
-      return res.status(400).json({ ok: false, error: "Missing required field 'deviceId'." });
+      return res.status(400).json({
+        ok: false,
+        error: "Missing or invalid ':id' (userId), or user has no deviceId.",
+      });
     }
+
     if (!foodId || !ObjectId.isValid(foodId)) {
-      return res.status(400).json({ ok: false, error: "Missing or invalid 'foodId' (expected Mongo ObjectId)." });
+      return res.status(400).json({
+        ok: false,
+        error: "Missing or invalid 'foodId' (expected Mongo ObjectId).",
+      });
     }
 
     const result = await addUserFavoriteByDeviceId(db, {
@@ -480,9 +508,9 @@ app.post("/favorites/add", async (req, res) => {
       brandName,
     });
 
-    return res.json({ ok: true, deviceId, favorites: result || [] });
+    return res.json({ ok: true, userId, deviceId, favorites: result || [] });
   } catch (err) {
-    console.error("[Favorites/Add] Error:", err);
+    console.error("[Favorites/AddByUserId] Error:", err);
     const status = err?.statusCode || 500;
     return res.status(status).json({
       ok: false,
@@ -491,24 +519,31 @@ app.post("/favorites/add", async (req, res) => {
   }
 });
 
-//----------------------------------------------------------------------------------------------------------------------------
-
-// POST /favorites/delete  → removes a favorite from the user's profile
-// Body: { deviceId, foodId }
-app.post("/favorites/delete", async (req, res) => {
+// POST /users/:id/favorites/delete  → removes a favorite from the user's profile (by userId)
+// Body: { foodId }
+app.post("/users/:id/favorites/delete", async (req, res) => {
   try {
     if (!db) {
       return res.status(500).json({ ok: false, error: "DB not ready" });
     }
 
-    const deviceId = String(req.body?.deviceId || "").trim();
+    const userId = String(req.params?.id || "").trim();
+    const deviceId = await getDeviceIdForUserId(db, userId);
+
     const foodId = String(req.body?.foodId || "").trim();
 
     if (!deviceId) {
-      return res.status(400).json({ ok: false, error: "Missing required field 'deviceId'." });
+      return res.status(400).json({
+        ok: false,
+        error: "Missing or invalid ':id' (userId), or user has no deviceId.",
+      });
     }
+
     if (!foodId || !ObjectId.isValid(foodId)) {
-      return res.status(400).json({ ok: false, error: "Missing or invalid 'foodId' (expected Mongo ObjectId)." });
+      return res.status(400).json({
+        ok: false,
+        error: "Missing or invalid 'foodId' (expected Mongo ObjectId).",
+      });
     }
 
     const result = await deleteUserFavoriteByDeviceId(db, {
@@ -516,9 +551,9 @@ app.post("/favorites/delete", async (req, res) => {
       foodId,
     });
 
-    return res.json({ ok: true, deviceId, favorites: result || [] });
+    return res.json({ ok: true, userId, deviceId, favorites: result || [] });
   } catch (err) {
-    console.error("[Favorites/Delete] Error:", err);
+    console.error("[Favorites/DeleteByUserId] Error:", err);
     const status = err?.statusCode || 500;
     return res.status(status).json({
       ok: false,
@@ -526,8 +561,6 @@ app.post("/favorites/delete", async (req, res) => {
     });
   }
 });
-
-//-------------------------------------------------------------------------------------------------------
 
 // POST /users/ensure → create or update a user by deviceId
 app.post("/users/ensure", async (req, res) => {
