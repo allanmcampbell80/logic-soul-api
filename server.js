@@ -6,6 +6,7 @@ import { findBestMatchesForMealItems } from "./services/mealSearch.js";
 import { ensureUser, updateUserProfile, patchUserDailyTotals } from "./services/users.js";
 import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, deleteUserMeal,} from "./services/userMeals.js";
 import { getFoodDetails } from "./services/foodDetails.js";
+import { getUserFavoritesByDeviceId, addUserFavoriteByDeviceId, deleteUserFavoriteByDeviceId,} from "./services/favorites.js";
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -348,10 +349,16 @@ async function chooseBestCanadianDocForUPC(normalizedUPC16) {
 }
 
 
+//-----------------------------------------------------------------------------------------------------
+
 // Health check
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "LogicSoul API" });
 });
+
+
+//----------------------------------------------------------------------------------------------------------------
+
 
 // POST /api/food-items/:id/report
 // Flags a food item to be ignored until a human review.
@@ -417,6 +424,110 @@ app.post("/api/food-items/:id/report", async (req, res) => {
   }
 });
 
+//-------------------------------------------------------------------------------------------------------
+// Favorites
+
+// GET /favorites?deviceId=...  → returns the user's favorites list
+app.get("/favorites", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const deviceId = String(req.query?.deviceId || "").trim();
+    if (!deviceId) {
+      return res.status(400).json({ ok: false, error: "Missing required query parameter 'deviceId'." });
+    }
+
+    const favorites = await getUserFavoritesByDeviceId(db, deviceId);
+    return res.json({ ok: true, deviceId, favorites: favorites || [] });
+  } catch (err) {
+    console.error("[Favorites/List] Error:", err);
+    const status = err?.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err?.message || "Failed to fetch favorites",
+    });
+  }
+});
+
+//----------------------------------------------------------------------------------------------------------------
+
+// POST /favorites/add  → adds a favorite to the user's profile
+// Body: { deviceId, foodId, commonName?, brandName? }
+app.post("/favorites/add", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const deviceId = String(req.body?.deviceId || "").trim();
+    const foodId = String(req.body?.foodId || "").trim();
+    const commonName = req.body?.commonName != null ? String(req.body.commonName).trim() : null;
+    const brandName = req.body?.brandName != null ? String(req.body.brandName).trim() : null;
+
+    if (!deviceId) {
+      return res.status(400).json({ ok: false, error: "Missing required field 'deviceId'." });
+    }
+    if (!foodId || !ObjectId.isValid(foodId)) {
+      return res.status(400).json({ ok: false, error: "Missing or invalid 'foodId' (expected Mongo ObjectId)." });
+    }
+
+    const result = await addUserFavoriteByDeviceId(db, {
+      deviceId,
+      foodId,
+      commonName,
+      brandName,
+    });
+
+    return res.json({ ok: true, deviceId, favorites: result || [] });
+  } catch (err) {
+    console.error("[Favorites/Add] Error:", err);
+    const status = err?.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err?.message || "Failed to add favorite",
+    });
+  }
+});
+
+//----------------------------------------------------------------------------------------------------------------------------
+
+// POST /favorites/delete  → removes a favorite from the user's profile
+// Body: { deviceId, foodId }
+app.post("/favorites/delete", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const deviceId = String(req.body?.deviceId || "").trim();
+    const foodId = String(req.body?.foodId || "").trim();
+
+    if (!deviceId) {
+      return res.status(400).json({ ok: false, error: "Missing required field 'deviceId'." });
+    }
+    if (!foodId || !ObjectId.isValid(foodId)) {
+      return res.status(400).json({ ok: false, error: "Missing or invalid 'foodId' (expected Mongo ObjectId)." });
+    }
+
+    const result = await deleteUserFavoriteByDeviceId(db, {
+      deviceId,
+      foodId,
+    });
+
+    return res.json({ ok: true, deviceId, favorites: result || [] });
+  } catch (err) {
+    console.error("[Favorites/Delete] Error:", err);
+    const status = err?.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err?.message || "Failed to delete favorite",
+    });
+  }
+});
+
+//-------------------------------------------------------------------------------------------------------
 
 // POST /users/ensure → create or update a user by deviceId
 app.post("/users/ensure", async (req, res) => {
@@ -432,6 +543,8 @@ app.post("/users/ensure", async (req, res) => {
     });
   }
 });
+
+//--------------------------------------------------------------------------------------------------------
 
 // PATCH /users/:id/profile → update basic profile info
 app.patch("/users/:id/profile", async (req, res) => {
@@ -449,6 +562,8 @@ app.patch("/users/:id/profile", async (req, res) => {
   }
 });
 
+
+//-------------------------------------------------------------------------------------------------------------
 
 app.post("/users/:id/meals", async (req, res) => {
   try {
@@ -504,6 +619,8 @@ app.post("/users/:id/meals", async (req, res) => {
     });
   }
 });
+
+//---------------------------------------------------------------------------------------------
 
 // GET /users/:id/meals?dateKey=YYYY-MM-DD
 // Returns the user's meals for a given day (sorted by time).
@@ -572,6 +689,8 @@ app.get("/users/:id/meals", async (req, res) => {
   }
 });
 
+//----------------------------------------------------------------------------------------------------------------
+
 // DELETE /users/:id/meals/:mealId
 // Deletes a single logged meal and recomputes that day's totals.
 app.delete("/users/:id/meals/:mealId", async (req, res) => {
@@ -627,6 +746,8 @@ app.delete("/users/:id/meals/:mealId", async (req, res) => {
     });
   }
 });
+
+//------------------------------------------------------------------------------------------------
 
 // GET /users/:id/daily-totals?dateKey=YYYY-MM-DD
 // Returns the user's daily nutrition totals from the user_daily_totals collection.
@@ -702,6 +823,8 @@ app.get("/users/:id/daily-totals", async (req, res) => {
   }
 });
 
+//------------------------------------------------------------------------------------------------------------
+
 // PATCH /users/:id/daily-totals/checkin
 // Body: { dateKey: "YYYY-MM-DD", patch: { "checkin_mood": 6, ... }, timezone?: "America/Toronto" }
 // Merges patch keys into doc.totals.* and upserts the daily totals doc if missing.
@@ -725,6 +848,10 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
     });
   }
 });
+
+
+//-------------------------------------------------------------------------------------------------------
+
 
 // POST /foods  → insert a product or ingredient
 // Body should be your FoodItem object, including type: "product" | "ingredient"
@@ -750,6 +877,8 @@ app.post("/foods", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+//----------------------------------------------------------------------------------------------------------
 
 // POST /foods/user-enriched  → insert a GPT-enriched user product from barcode+photos
 app.post("/foods/user-enriched", async (req, res) => {
@@ -805,6 +934,8 @@ app.post("/foods/user-enriched", async (req, res) => {
     res.status(500).json({ error: "Internal server error inserting user-enriched product." });
   }
 });
+
+//-----------------------------------------------------------------------------------------
 
 // POST /user-enriched-food-item  → alias for iOS client endpoint
 app.post("/user-enriched-food-item", async (req, res) => {
@@ -865,6 +996,8 @@ app.post("/user-enriched-food-item", async (req, res) => {
       .json({ error: "Internal server error inserting user-enriched product (alias)." });
   }
 });
+
+//---------------------------------------------------------------------------------------------------------
 
 // GET /foods/barcode/:barcode  → fetch best product by UPC/EAN
 app.get("/foods/barcode/:barcode", async (req, res) => {
@@ -947,6 +1080,9 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
   }
 });
 
+//----------------------------------------------------------------------------------------------
+
+
 // GET /food-items/:id → fetch a single food_item by ObjectId (raw, unchanged)
 app.get("/food-items/:id", async (req, res) => {
   try {
@@ -980,6 +1116,9 @@ app.get("/food-items/:id", async (req, res) => {
     });
   }
 });
+
+
+//--------------------------------------------------------------------------------------------------
 
 // GET /foods/details?ids=... → fetch nutrient/details for one or more food IDs
 // Usage examples:
@@ -1046,6 +1185,10 @@ app.get("/foods/details", async (req, res) => {
     });
   }
 });
+
+
+//--------------------------------------------------------------------------------------------------------
+
 
 // POST /api/meal-search
 // Accepts a parsed meal JSON (from GPT meal parser) and returns best DB matches.
@@ -1163,6 +1306,8 @@ function computeUSDACombinedScore(doc, options) {
   doc._combinedScore = score;
   return score;
 }
+
+//----------------------------------------------------------------------------------------------------------------
 
 // POST /foods/usda-candidates
 // Given a product name + brandName, return top USDA-branded candidates.
@@ -1389,6 +1534,9 @@ app.post("/foods/usda-candidates", async (req, res) => {
     });
   }
 });
+
+
+//--------------------------------------------------------------------------------------------------------------
 
 // POST /foods/link-canadian-to-usda
 // Link a Canadian OFF product to a USDA-branded equivalent for future lookups.
