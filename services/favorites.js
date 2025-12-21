@@ -10,7 +10,7 @@
 //   }
 // ]
 
-const { ObjectId } = require("mongodb");
+import { ObjectId } from "mongodb";
 
 function toObjectId(id, fieldName = "id") {
   if (!id) throw new Error(`${fieldName} is required`);
@@ -25,7 +25,7 @@ function normalizeString(v) {
   return s.length ? s : null;
 }
 
-async function getUserFavoritesByDeviceId(db, deviceId) {
+export async function getUserFavoritesByDeviceId(db, deviceId) {
   if (!deviceId) throw new Error("deviceId is required");
 
   const user = await db.collection("users").findOne(
@@ -52,7 +52,7 @@ async function getUserFavoritesByDeviceId(db, deviceId) {
   };
 }
 
-async function addUserFavoriteByDeviceId(db, { deviceId, foodId, commonName, brandName }) {
+export async function addUserFavoriteByDeviceId(db, { deviceId, foodId, commonName, brandName }) {
   if (!deviceId) throw new Error("deviceId is required");
   const foodObjectId = toObjectId(foodId, "foodId");
 
@@ -127,7 +127,7 @@ async function addUserFavoriteByDeviceId(db, { deviceId, foodId, commonName, bra
   };
 }
 
-async function deleteUserFavoriteByDeviceId(db, { deviceId, foodId }) {
+export async function deleteUserFavoriteByDeviceId(db, { deviceId, foodId }) {
   if (!deviceId) throw new Error("deviceId is required");
   const foodObjectId = toObjectId(foodId, "foodId");
 
@@ -146,9 +146,3 @@ async function deleteUserFavoriteByDeviceId(db, { deviceId, foodId }) {
     modifiedCount: res.modifiedCount,
   };
 }
-
-module.exports = {
-  getUserFavoritesByDeviceId,
-  addUserFavoriteByDeviceId,
-  deleteUserFavoriteByDeviceId,
-};
