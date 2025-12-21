@@ -455,9 +455,9 @@ app.get("/users/:id/favorites", async (req, res) => {
   }
 });
 
-// POST /users/:id/favorites/add  → adds a favorite to the user's profile (by userId)
+// POST /users/:id/favorites  → adds a favorite to the user's profile (by userId)
 // Body: { foodId, commonName?, brandName? }
-app.post("/users/:id/favorites/add", async (req, res) => {
+app.post("/users/:id/favorites", async (req, res) => {
   try {
     if (!db) {
       return res.status(500).json({ ok: false, error: "DB not ready" });
@@ -502,9 +502,8 @@ app.post("/users/:id/favorites/add", async (req, res) => {
   }
 });
 
-// POST /users/:id/favorites/delete  → removes a favorite from the user's profile (by userId)
-// Body: { foodId }
-app.post("/users/:id/favorites/delete", async (req, res) => {
+// DELETE /users/:id/favorites/:foodId  → removes a favorite from the user's profile (by userId)
+app.delete("/users/:id/favorites/:foodId", async (req, res) => {
   try {
     if (!db) {
       return res.status(500).json({ ok: false, error: "DB not ready" });
@@ -518,12 +517,12 @@ app.post("/users/:id/favorites/delete", async (req, res) => {
       });
     }
 
-    const foodId = String(req.body?.foodId || "").trim();
+    const foodId = String(req.params?.foodId || "").trim();
 
     if (!foodId || !ObjectId.isValid(foodId)) {
       return res.status(400).json({
         ok: false,
-        error: "Missing or invalid 'foodId' (expected Mongo ObjectId).",
+        error: "Missing or invalid ':foodId' (expected Mongo ObjectId).",
       });
     }
 
