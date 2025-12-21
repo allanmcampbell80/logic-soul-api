@@ -25,23 +25,22 @@ function normalizeString(v) {
   return s.length ? s : null;
 }
 
-export async function getUserFavoritesByDeviceId(db, deviceId) {
-  if (!deviceId) throw new Error("deviceId is required");
+export async function getUserFavoritesByUserId(db, userId) {
+  const userObjectId = toObjectId(userId, "userId");
 
   const user = await db.collection("users").findOne(
-    { deviceId },
-    { projection: { _id: 1, deviceId: 1, favorites: 1 } }
+    { _id: userObjectId },
+    { projection: { _id: 1, favorites: 1 } }
   );
 
   if (!user) {
-    return { userId: null, deviceId, favorites: [] };
+    return { userId: String(userObjectId), favorites: [] };
   }
 
   const favorites = Array.isArray(user.favorites) ? user.favorites : [];
 
   return {
-    userId: user._id,
-    deviceId: user.deviceId,
+    userId: String(user._id),
     favorites: favorites.map((f) => ({
       foodId: f.foodId,
       foodIdString: f.foodId ? String(f.foodId) : null,
@@ -52,8 +51,8 @@ export async function getUserFavoritesByDeviceId(db, deviceId) {
   };
 }
 
-export async function addUserFavoriteByDeviceId(db, { deviceId, foodId, commonName, brandName }) {
-  if (!deviceId) throw new Error("deviceId is required");
+export async function addUserFavoriteByUserId(db, { userId, foodId, commonName, brandName }) {
+  const userObjectId = toObjectId(userId, "userId");
   const foodObjectId = toObjectId(foodId, "foodId");
 
   const favoriteDoc = {
@@ -63,31 +62,9 @@ export async function addUserFavoriteByDeviceId(db, { deviceId, foodId, commonNa
     addedAt: new Date(),
   };
 
-  // Ensure the user exists and get the user's _id in one round trip.
-  const ensureUserRes = await db.collection("users").findOneAndUpdate(
-    { deviceId },
-    {
-      $setOnInsert: {
-        deviceId,
-        createdAt: new Date(),
-      },
-      $set: {
-        lastSeenAt: new Date(),
-      },
-    },
-    {
-      upsert: true,
-      returnDocument: "after",
-      projection: { _id: 1, deviceId: 1 },
-    }
-  );
-
-  const userId = ensureUserRes?.value?._id || null;
-  if (!userId) throw new Error("Failed to resolve userId for deviceId");
-
   // Atomic de-dupe + append using a pipeline update (avoids $pull+$push path conflicts).
-  await db.collection("users").updateOne(
-    { _id: userId },
+  const res = await db.collection("users").updateOne(
+    { _id: userObjectId },
     [
       {
         $set: {
@@ -116,10 +93,13 @@ export async function addUserFavoriteByDeviceId(db, { deviceId, foodId, commonNa
     ]
   );
 
+  if (!res.matchedCount) {
+    throw new Error("User not found for userId");
+  }
+
   return {
     ok: true,
-    deviceId,
-    userId,
+    userId: String(userObjectId),
     favorite: {
       ...favoriteDoc,
       foodIdString: String(foodObjectId),
@@ -127,21 +107,25 @@ export async function addUserFavoriteByDeviceId(db, { deviceId, foodId, commonNa
   };
 }
 
-export async function deleteUserFavoriteByDeviceId(db, { deviceId, foodId }) {
-  if (!deviceId) throw new Error("deviceId is required");
+export async function deleteUserFavoriteByUserId(db, { userId, foodId }) {
+  const userObjectId = toObjectId(userId, "userId");
   const foodObjectId = toObjectId(foodId, "foodId");
 
   const res = await db.collection("users").updateOne(
-    { deviceId },
+    { _id: userObjectId },
     {
       $pull: { favorites: { foodId: foodObjectId } },
       $set: { lastSeenAt: new Date() },
     }
   );
 
+  if (!res.matchedCount) {
+    throw new Error("User not found for userId");
+  }
+
   return {
     ok: true,
-    deviceId,
+    userId: String(userObjectId),
     foodIdString: String(foodObjectId),
     modifiedCount: res.modifiedCount,
   };
