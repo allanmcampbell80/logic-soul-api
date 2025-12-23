@@ -2,9 +2,6 @@
 import { ObjectId } from "mongodb";
 import { usersCollection, userMealsCollection, foodItemsCollection } from "./mongo.js";
 
-// userMealsCollection should be initialized in mongo.js like:
-// export const userMealsCollection = db.collection("user_meals");
-
 // Nutrient keys from foods.nutrients[].key that we want to aggregate
 const DAILY_PANEL_NUTRIENTS = {
   // Calories / energy
@@ -13,6 +10,27 @@ const DAILY_PANEL_NUTRIENTS = {
 
   // Macros
   protein: { field: "protein_g", unit: "g" },
+
+  // Protein breakdown (amino acids)
+  tryptophan: { field: "tryptophan_g", unit: "g" },
+  threonine: { field: "threonine_g", unit: "g" },
+  isoleucine: { field: "isoleucine_g", unit: "g" },
+  leucine: { field: "leucine_g", unit: "g" },
+  lysine: { field: "lysine_g", unit: "g" },
+  methionine: { field: "methionine_g", unit: "g" },
+  cystine: { field: "cystine_g", unit: "g" },
+  phenylalanine: { field: "phenylalanine_g", unit: "g" },
+  tyrosine: { field: "tyrosine_g", unit: "g" },
+  valine: { field: "valine_g", unit: "g" },
+  arginine: { field: "arginine_g", unit: "g" },
+  histidine: { field: "histidine_g", unit: "g" },
+  alanine: { field: "alanine_g", unit: "g" },
+  aspartic_acid: { field: "aspartic_acid_g", unit: "g" },
+  glutamic_acid: { field: "glutamic_acid_g", unit: "g" },
+  glycine: { field: "glycine_g", unit: "g" },
+  proline: { field: "proline_g", unit: "g" },
+  serine: { field: "serine_g", unit: "g" },
+
   carbohydrate: { field: "carbs_g", unit: "g" },
   fiber: { field: "fiber_g", unit: "g" },
   total_sugars: { field: "sugars_g", unit: "g" },
@@ -22,6 +40,14 @@ const DAILY_PANEL_NUTRIENTS = {
   starch: { field: "starch_g", unit: "g" },
   added_sugars: { field: "added_sugars_g", unit: "g" },
   sugar_alcohol: { field: "sugar_alcohol_g", unit: "g" },
+
+  // Specific sugars (when provided)
+  sucrose: { field: "sucrose_g", unit: "g" },
+  glucose: { field: "glucose_g", unit: "g" },
+  fructose: { field: "fructose_g", unit: "g" },
+  lactose: { field: "lactose_g", unit: "g" },
+  maltose: { field: "maltose_g", unit: "g" },
+  galactose: { field: "galactose_g", unit: "g" },
 
   // Common sugar alcohols (some datasets expose these explicitly)
   sorbitol: { field: "sorbitol_g", unit: "g" },
@@ -65,7 +91,8 @@ const DAILY_PANEL_NUTRIENTS = {
 
   // Other macro-adjacent
   cholesterol: { field: "cholesterol_mg", unit: "mg" },
-  water: { field: "water_g", unit: "g" },
+  // Water from foods (USDA reports in grams; store as mL for easy merging with user hydration)
+  water: { field: "water_from_food_ml", unit: "g" },
 
   // Micros — vitamins
   vitamin_c: { field: "vitamin_c_mg", unit: "mg" },
@@ -86,6 +113,7 @@ const DAILY_PANEL_NUTRIENTS = {
   // Vitamin A is messy in USDA because the key is often reused for both IU and RAE.
   // We only aggregate the RAE form when it appears (unit µg).
   vitamin_a: { field: "vitamin_a_rae_ug", unit: "µg" },
+  retinol: { field: "retinol_ug", unit: "µg" },
 
   // Vitamin D similarly appears as IU and µg under the same key in some datasets.
   // Prefer µg for aggregation.
@@ -108,12 +136,20 @@ const DAILY_PANEL_NUTRIENTS = {
   // Other compounds
   caffeine: { field: "caffeine_mg", unit: "mg" },
   theobromine: { field: "theobromine_mg", unit: "mg" },
+  betaine: { field: "betaine_mg", unit: "mg" },
   alcohol_ethyl: { field: "alcohol_g", unit: "g" },
-  fluoride_f: { field: "fluoride_mg", unit: "mg" },
+  fluoride_f: { field: "fluoride_ug", unit: "µg" },
   beta_sitosterol: { field: "beta_sitosterol_mg", unit: "mg" },
 
   // Useful health-related micros
   choline_total: { field: "choline_mg", unit: "mg" },
+
+  // Phytonutrients / carotenoids (when available)
+  carotene_beta: { field: "carotene_beta_ug", unit: "µg" },
+  carotene_alpha: { field: "carotene_alpha_ug", unit: "µg" },
+  cryptoxanthin_beta: { field: "cryptoxanthin_beta_ug", unit: "µg" },
+  lycopene: { field: "lycopene_ug", unit: "µg" },
+  lutein_zeaxanthin: { field: "lutein_zeaxanthin_ug", unit: "µg" },
 };
 
 export async function logUserMeal(userId, payload) {
@@ -378,7 +414,14 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
       const per100g = nutrient.per_100g;
       if (typeof per100g !== "number") continue;
 
-      const contribution = per100g * factor;
+      let contribution = per100g * factor;
+
+      // Special-case: USDA water is reported in grams; store as mL for app hydration merging.
+      if (nutrient.key === "water" && cfg.field === "water_from_food_ml") {
+        // 1 g water ≈ 1 mL
+        contribution = contribution * 1;
+      }
+
       addToTotal(cfg.field, contribution);
     }
   }
