@@ -2,6 +2,9 @@
 import { ObjectId } from "mongodb";
 import { usersCollection, userMealsCollection, foodItemsCollection } from "./mongo.js";
 
+// userMealsCollection should be initialized in mongo.js like:
+// export const userMealsCollection = db.collection("user_meals");
+
 // Nutrient keys from foods.nutrients[].key that we want to aggregate
 const DAILY_PANEL_NUTRIENTS = {
   // Calories / energy
@@ -181,13 +184,24 @@ export async function logUserMeal(userId, payload) {
   const loggedAtDate = loggedAt ? new Date(loggedAt) : now;
   const dateKey = (payload.dateKey) || loggedAtDate.toISOString().slice(0, 10); // "YYYY-MM-DD"
 
-  const safeItems = Array.isArray(items) ? items.map((it) => ({
-    name: it.name,
-    foodId: it.foodId ? new ObjectId(it.foodId) : null,
-    quantity: it.quantity,              // e.g. 120
-    quantityUnit: it.quantityUnit || "g",
-    confidence: typeof it.confidence === "number" ? it.confidence : null
-  })) : [];
+  const safeItems = Array.isArray(items)
+    ? items.map((it) => {
+        const qty = it.quantity && typeof it.quantity === "object" ? it.quantity : null;
+        const qtyUnit = qty?.unit ? String(qty.unit) : null;
+
+        return {
+          name: it.name,
+          foodId: it.foodId ? new ObjectId(it.foodId) : null,
+          quantity: qty, // expected shape: { value, unit, isEstimate, ... }
+
+          // Keep a convenient top-level unit for older clients / debugging.
+          // Prefer the explicit quantity.unit when present.
+          quantityUnit: qtyUnit || it.quantityUnit || "g",
+
+          confidence: typeof it.confidence === "number" ? it.confidence : null,
+        };
+      })
+    : [];
 
   const doc = {
     userId: userObjectId,
@@ -285,6 +299,13 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
       // Case 1: explicit grams
       if (value && unit === "g") {
         gramsToAdd = value;
+
+      // Case 1b: explicit milliliters
+      // For now, treat 1 mL ≈ 1 g (good approximation for water/coffee-like liquids).
+      // Later we can add food-specific density if needed.
+      } else if (value && unit === "ml") {
+        gramsToAdd = value;
+
       } else {
         // Case 2: fallback to serving size when:
         //  - unit looks like "serving"/"servings", OR
