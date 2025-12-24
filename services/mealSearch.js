@@ -369,7 +369,8 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
       kind: item.kind,
       mealType: parsedMeal.mealType,
       candidates: top.map((c) => ({
-        id: c.doc._id,
+        // Always return a plain string ID (not a BSON ObjectId / {$oid: ...} wrapper)
+        id: String(c.doc._id),
         name: c.doc.name,
         normalized_name: c.doc.normalized_name,
         common_name: c.doc.common_name || null,
