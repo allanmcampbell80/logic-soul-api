@@ -1520,7 +1520,7 @@ app.post("/foods/usda-candidates", async (req, res) => {
     );
 
     const simplified = results.map((doc) => ({
-      id: doc._id,
+      id: String(doc._id),
       name: doc.name,
       normalizedName: doc.normalized_name,
       normalizedUPC: doc.normalized_upc,
