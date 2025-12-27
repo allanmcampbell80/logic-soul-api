@@ -200,6 +200,50 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
       .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
       .map((w) => new RegExp(`\\b${w}\\b`, "i"));
 
+    const isSingleToken = finalWords.length === 1;
+
+    // For very short, single-token queries (e.g. "egg"), ingredient searches should NOT drift into restaurant/prepared items.
+    // These tokens are extremely common in ingredients_text for prepared foods (e.g. egg rolls).
+    const singleToken = isSingleToken ? finalWords[0] : null;
+    const isVeryShortSingleToken = isSingleToken && singleToken && singleToken.length <= 4;
+
+    // Build match ORs we can reuse, with a safer version for short single-token queries.
+    const ingredientNameOr = isVeryShortSingleToken
+      ? [
+          { normalized_name: regex },
+          { display_product_name: regex },
+          { name: regex },
+          { "names_enrichment_v2.brand_name": regex },
+          { "names_enrichment_v2.product_name": regex }
+        ]
+      : [
+          { normalized_name: regex },
+          { display_product_name: regex },
+          { name: regex },
+          { "names_enrichment_v2.brand_name": regex },
+          { "names_enrichment_v2.product_name": regex },
+          { ingredients_text: regex }
+        ];
+
+    const commonNameOrExact = [
+      { normalized_common_name: canonicalNorm },
+      { "names_enrichment_v2.common_name": canonicalNorm },
+      { common_name: exactNormRegex },
+      { "names_enrichment_v2.common_name": exactNormRegex },
+      { normalized_alt_names: canonicalNorm },
+      { "names_enrichment_v2.alt_names": exactNormRegex },
+      { alt_names: exactNormRegex }
+    ];
+
+    const commonNameOrPhrase = [
+      { normalized_common_name: regex },
+      { common_name: regex },
+      { "names_enrichment_v2.common_name": regex },
+      { normalized_alt_names: regex },
+      { alt_names: regex },
+      { "names_enrichment_v2.alt_names": regex }
+    ];
+
     const isProductPreferred =
       item.kind === "product" ||
       (item.kind === "either" && /cereal|bar|chips|soup|yogurt|cookie|crackers|pizza|soda|cola|juice|rice krispies|kellogg|shake\s*n\s*bake|betty\s*crocker|pillsbury/.test(lower));
@@ -208,32 +252,37 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
 
     // 0) Best signal first: common_name / normalized_common_name exact matches
     queries.push({
-      filter: {
-        $or: [
-          { normalized_common_name: canonicalNorm },
-          { "names_enrichment_v2.common_name": canonicalNorm },
-          { common_name: exactNormRegex },
-          { "names_enrichment_v2.common_name": exactNormRegex },
-          { normalized_alt_names: canonicalNorm },
-          { "names_enrichment_v2.alt_names": exactNormRegex },
-          { alt_names: exactNormRegex }
-        ]
-      },
+      filter: isVeryShortSingleToken
+        ? {
+            $and: [
+              { $or: commonNameOrExact },
+              {
+                $or: [{ food_type: "ingredient" }, { is_simple_ingredient: true }]
+              },
+              { is_restaurant_item: { $ne: true } }
+            ]
+          }
+        : {
+            $or: commonNameOrExact
+          },
       label: "common-name-exact"
     });
 
     // 0b) Next best: common_name phrase match with boundaries
     queries.push({
-      filter: {
-        $or: [
-          { normalized_common_name: regex },
-          { common_name: regex },
-          { "names_enrichment_v2.common_name": regex },
-          { normalized_alt_names: regex },
-          { alt_names: regex },
-          { "names_enrichment_v2.alt_names": regex }
-        ]
-      },
+      filter: isVeryShortSingleToken
+        ? {
+            $and: [
+              { $or: commonNameOrPhrase },
+              {
+                $or: [{ food_type: "ingredient" }, { is_simple_ingredient: true }]
+              },
+              { is_restaurant_item: { $ne: true } }
+            ]
+          }
+        : {
+            $or: commonNameOrPhrase
+          },
       label: "common-name-phrase"
     });
 
@@ -267,14 +316,7 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
               ]
             },
             {
-              $or: [
-                { normalized_name: regex },
-                { display_product_name: regex },
-                { name: regex },
-                { "names_enrichment_v2.brand_name": regex },
-                { "names_enrichment_v2.product_name": regex },
-                { ingredients_text: regex }
-              ]
+              $or: ingredientNameOr
             }
           ]
         },
@@ -283,26 +325,29 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
     } else {
       // Ingredient first
       queries.push({
-        filter: {
-          $and: [
-            {
-              $or: [
-                { food_type: { $in: ["ingredient", "prepared_dish"] } },
-                { is_simple_ingredient: true }
-              ]
-            },
-            {
-              $or: [
-                { normalized_name: regex },
-                { display_product_name: regex },
-                { name: regex },
-                { "names_enrichment_v2.brand_name": regex },
-                { "names_enrichment_v2.product_name": regex },
-                { ingredients_text: regex }
+        filter: isVeryShortSingleToken
+          ? {
+              $and: [
+                {
+                  $or: [{ food_type: "ingredient" }, { is_simple_ingredient: true }]
+                },
+                { is_restaurant_item: { $ne: true } },
+                { $or: ingredientNameOr }
               ]
             }
-          ]
-        },
+          : {
+              $and: [
+                {
+                  $or: [
+                    { food_type: { $in: ["ingredient", "prepared_dish"] } },
+                    { is_simple_ingredient: true }
+                  ]
+                },
+                {
+                  $or: ingredientNameOr
+                }
+              ]
+            },
         label: "ingredient-primary"
       });
 
