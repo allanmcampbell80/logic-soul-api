@@ -126,6 +126,12 @@ function labelBoost(label) {
     case "product-fallback": return 0.5;
     case "ingredient-fallback": return 0.5;
     case "single-word": return 0.0;
+    case "restaurant-common-name-exact": return 3.25;
+    case "restaurant-common-name-phrase": return 2.25;
+    case "restaurant-primary": return 1.25;
+    case "ingredient-primary-relaxed": return 0.75;
+    case "ingredient-fallback-relaxed": return 0.25;
+    case "single-word-ingredient": return 0.1;
     default: return 0.0;
   }
 }
@@ -202,10 +208,27 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
 
     const isSingleToken = finalWords.length === 1;
 
-    // For very short, single-token queries (e.g. "egg"), ingredient searches should NOT drift into restaurant/prepared items.
-    // These tokens are extremely common in ingredients_text for prepared foods (e.g. egg rolls).
     const singleToken = isSingleToken ? finalWords[0] : null;
     const isVeryShortSingleToken = isSingleToken && singleToken && singleToken.length <= 4;
+    const requireSimpleIngredient = item.kind === "ingredient";
+
+    // If the parser strongly indicates this is a restaurant item, prioritize restaurant-only matches first.
+    // (We still allow fallback to non-restaurant foods if nothing matches.)
+    const requireRestaurantItem =
+      item.kind === "restaurant" ||
+      item.isRestaurantItem === true ||
+      item.is_restaurant_item === true ||
+      item.preparation_context === "restaurant" ||
+      item.preparationContext === "restaurant" ||
+      (typeof item.preparation_context === "string" && item.preparation_context.toLowerCase().includes("restaurant")) ||
+      (typeof item.preparationContext === "string" && item.preparationContext.toLowerCase().includes("restaurant"));
+
+    const restaurantOnlyFilter = {
+      $or: [
+        { is_restaurant_item: true },
+        { "names_enrichment_v2.is_restaurant_item": true }
+      ]
+    };
 
     // Build match ORs we can reuse, with a safer version for short single-token queries.
     const ingredientNameOr = isVeryShortSingleToken
@@ -250,16 +273,56 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
 
     const queries = [];
 
+    // Restaurant-first passes (only when the parser indicates a restaurant item)
+    if (requireRestaurantItem) {
+      queries.push({
+        filter: {
+          $and: [
+            restaurantOnlyFilter,
+            { $or: commonNameOrExact }
+          ]
+        },
+        label: "restaurant-common-name-exact"
+      });
+
+      queries.push({
+        filter: {
+          $and: [
+            restaurantOnlyFilter,
+            { $or: commonNameOrPhrase }
+          ]
+        },
+        label: "restaurant-common-name-phrase"
+      });
+
+      // Restaurant-focused name match (broad but still restaurant-only)
+      queries.push({
+        filter: {
+          $and: [
+            restaurantOnlyFilter,
+            { $or: [
+                { normalized_name: regex },
+                { display_product_name: regex },
+                { name: regex },
+                { common_name: regex },
+                { normalized_common_name: regex },
+                { "names_enrichment_v2.common_name": regex },
+                { ingredients_text: regex }
+              ]
+            }
+          ]
+        },
+        label: "restaurant-primary"
+      });
+    }
+
     // 0) Best signal first: common_name / normalized_common_name exact matches
     queries.push({
-      filter: isVeryShortSingleToken
+      filter: (isVeryShortSingleToken || requireSimpleIngredient)
         ? {
             $and: [
               { $or: commonNameOrExact },
-              {
-                $or: [{ food_type: "ingredient" }, { is_simple_ingredient: true }]
-              },
-              { is_restaurant_item: { $ne: true } }
+              { is_simple_ingredient: true }
             ]
           }
         : {
@@ -270,14 +333,11 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
 
     // 0b) Next best: common_name phrase match with boundaries
     queries.push({
-      filter: isVeryShortSingleToken
+      filter: (isVeryShortSingleToken || requireSimpleIngredient)
         ? {
             $and: [
               { $or: commonNameOrPhrase },
-              {
-                $or: [{ food_type: "ingredient" }, { is_simple_ingredient: true }]
-              },
-              { is_restaurant_item: { $ne: true } }
+              { is_simple_ingredient: true }
             ]
           }
         : {
@@ -309,12 +369,14 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
       queries.push({
         filter: {
           $and: [
-            {
-              $or: [
-                { food_type: { $in: ["ingredient", "prepared_dish"] } },
-                { is_simple_ingredient: true }
-              ]
-            },
+            requireSimpleIngredient
+              ? { is_simple_ingredient: true }
+              : {
+                  $or: [
+                    { food_type: { $in: ["ingredient", "prepared_dish"] } },
+                    { is_simple_ingredient: true }
+                  ]
+                },
             {
               $or: ingredientNameOr
             }
@@ -322,16 +384,25 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
         },
         label: "ingredient-fallback"
       });
+
+      if (requireSimpleIngredient) {
+        queries.push({
+          filter: {
+            $and: [
+              { food_type: { $in: ["ingredient", "prepared_dish"] } },
+              { $or: ingredientNameOr }
+            ]
+          },
+          label: "ingredient-fallback-relaxed"
+        });
+      }
     } else {
       // Ingredient first
       queries.push({
-        filter: isVeryShortSingleToken
+        filter: (isVeryShortSingleToken || requireSimpleIngredient)
           ? {
               $and: [
-                {
-                  $or: [{ food_type: "ingredient" }, { is_simple_ingredient: true }]
-                },
-                { is_restaurant_item: { $ne: true } },
+                { is_simple_ingredient: true },
                 { $or: ingredientNameOr }
               ]
             }
@@ -350,6 +421,19 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
             },
         label: "ingredient-primary"
       });
+
+      // If we required a simple ingredient but found nothing, allow drifting to non-simple items later.
+      if (requireSimpleIngredient) {
+        queries.push({
+          filter: {
+            $and: [
+              { food_type: { $in: ["ingredient", "prepared_dish"] } },
+              { $or: ingredientNameOr }
+            ]
+          },
+          label: "ingredient-primary-relaxed"
+        });
+      }
 
       queries.push({
         filter: {
@@ -370,12 +454,33 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
     }
 
     // 3) Single-word fallback (VERY broad; limit hard)
-    queries.push({
-      filter: {
-        $or: buildSingleWordOr(singleWordRegexes)
-      },
-      label: "single-word"
-    });
+    if (isVeryShortSingleToken || requireSimpleIngredient) {
+      // Strict pass first
+      queries.push({
+        filter: {
+          $and: [
+            { is_simple_ingredient: true },
+            { $or: buildSingleWordOr(singleWordRegexes) }
+          ]
+        },
+        label: "single-word-ingredient"
+      });
+
+      // If strict finds nothing, allow drifting to anything (still broad)
+      queries.push({
+        filter: {
+          $or: buildSingleWordOr(singleWordRegexes)
+        },
+        label: "single-word"
+      });
+    } else {
+      queries.push({
+        filter: {
+          $or: buildSingleWordOr(singleWordRegexes)
+        },
+        label: "single-word"
+      });
+    }
 
     // Dedupe across query stages; keep the best-scoring entry per document.
     const candidatesById = new Map();
