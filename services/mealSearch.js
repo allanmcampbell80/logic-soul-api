@@ -132,6 +132,13 @@ function labelBoost(label) {
     case "ingredient-primary-relaxed": return 0.75;
     case "ingredient-fallback-relaxed": return 0.25;
     case "single-word-ingredient": return 0.1;
+    case "single-token-ingredient-prefix": return 3.5;
+    // New single-ingredient-first stages
+    case "single-ingredient-common-name-exact": return 3.1;
+    case "single-ingredient-common-name-phrase": return 2.1;
+    case "single-ingredient-primary": return 1.1;
+    case "single-token-single-ingredient-prefix": return 3.6;
+    case "single-token-simple-ingredient-prefix": return 3.4;
     default: return 0.0;
   }
 }
@@ -210,7 +217,24 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
 
     const singleToken = isSingleToken ? finalWords[0] : null;
     const isVeryShortSingleToken = isSingleToken && singleToken && singleToken.length <= 4;
-    const requireSimpleIngredient = item.kind === "ingredient";
+    const parserSaysSimpleIngredient =
+      item.is_simple_ingredient === true ||
+      item.isSimpleIngredient === true ||
+      item.is_simple_ingredient === "true" ||
+      item.isSimpleIngredient === "true";
+
+    const requireSimpleIngredient = item.kind === "ingredient" || parserSaysSimpleIngredient;
+
+    // For single-token ingredient searches (e.g., "egg"), prefer items whose names START with that token.
+    // This avoids high-frequency substring matches like "egg noodles" / "made without egg" and prevents "egg" -> "eggplant".
+    const escapedSingleToken = singleToken
+      ? singleToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      : null;
+
+    // Allow a simple plural (eggs) for single-token searches.
+    const singleTokenPrefixRegex = escapedSingleToken
+      ? new RegExp(`^${escapedSingleToken}s?\\b`, "i")
+      : null;
 
     // If the parser strongly indicates this is a restaurant item, prioritize restaurant-only matches first.
     // (We still allow fallback to non-restaurant foods if nothing matches.)
@@ -229,6 +253,9 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
         { "names_enrichment_v2.is_restaurant_item": true }
       ]
     };
+
+    const singleIngredientFilter = { is_single_ingredient: true };
+    const simpleIngredientFilter = { is_simple_ingredient: true };
 
     // Build match ORs we can reuse, with a safer version for short single-token queries.
     const ingredientNameOr = isVeryShortSingleToken
@@ -316,13 +343,70 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
       });
     }
 
+    // 0-pre) Single-token ingredient prefix match (highest precision for things like "egg")
+    // Prefer true single-ingredient foods first; then allow simple-ingredient foods.
+    if (requireSimpleIngredient && isSingleToken && singleTokenPrefixRegex) {
+      // Single-ingredient pass
+      queries.push({
+        filter: {
+          $and: [
+            singleIngredientFilter,
+            {
+              $or: [
+                { normalized_name: singleTokenPrefixRegex },
+                { name: singleTokenPrefixRegex },
+                { normalized_common_name: singleTokenPrefixRegex },
+                { common_name: singleTokenPrefixRegex },
+                { "names_enrichment_v2.common_name": singleTokenPrefixRegex },
+                { display_product_name: singleTokenPrefixRegex }
+              ]
+            }
+          ]
+        },
+        label: "single-token-single-ingredient-prefix"
+      });
+
+      // Simple-ingredient fallback pass
+      queries.push({
+        filter: {
+          $and: [
+            simpleIngredientFilter,
+            {
+              $or: [
+                { normalized_name: singleTokenPrefixRegex },
+                { name: singleTokenPrefixRegex },
+                { normalized_common_name: singleTokenPrefixRegex },
+                { common_name: singleTokenPrefixRegex },
+                { "names_enrichment_v2.common_name": singleTokenPrefixRegex },
+                { display_product_name: singleTokenPrefixRegex }
+              ]
+            }
+          ]
+        },
+        label: "single-token-simple-ingredient-prefix"
+      });
+    }
+
     // 0) Best signal first: common_name / normalized_common_name exact matches
+    // If parser indicates ingredient intent, try true single-ingredient foods first.
+    if (requireSimpleIngredient) {
+      queries.push({
+        filter: {
+          $and: [
+            { $or: commonNameOrExact },
+            singleIngredientFilter
+          ]
+        },
+        label: "single-ingredient-common-name-exact"
+      });
+    }
+
     queries.push({
       filter: (isVeryShortSingleToken || requireSimpleIngredient)
         ? {
             $and: [
               { $or: commonNameOrExact },
-              { is_simple_ingredient: true }
+              simpleIngredientFilter
             ]
           }
         : {
@@ -332,12 +416,24 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
     });
 
     // 0b) Next best: common_name phrase match with boundaries
+    if (requireSimpleIngredient) {
+      queries.push({
+        filter: {
+          $and: [
+            { $or: commonNameOrPhrase },
+            singleIngredientFilter
+          ]
+        },
+        label: "single-ingredient-common-name-phrase"
+      });
+    }
+
     queries.push({
       filter: (isVeryShortSingleToken || requireSimpleIngredient)
         ? {
             $and: [
               { $or: commonNameOrPhrase },
-              { is_simple_ingredient: true }
+              simpleIngredientFilter
             ]
           }
         : {
@@ -398,11 +494,24 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
       }
     } else {
       // Ingredient first
+      if (requireSimpleIngredient) {
+        // True single-ingredient foods first
+        queries.push({
+          filter: {
+            $and: [
+              singleIngredientFilter,
+              { $or: ingredientNameOr }
+            ]
+          },
+          label: "single-ingredient-primary"
+        });
+      }
+
       queries.push({
         filter: (isVeryShortSingleToken || requireSimpleIngredient)
           ? {
               $and: [
-                { is_simple_ingredient: true },
+                simpleIngredientFilter,
                 { $or: ingredientNameOr }
               ]
             }
@@ -411,7 +520,7 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
                 {
                   $or: [
                     { food_type: { $in: ["ingredient", "prepared_dish"] } },
-                    { is_simple_ingredient: true }
+                    simpleIngredientFilter
                   ]
                 },
                 {
