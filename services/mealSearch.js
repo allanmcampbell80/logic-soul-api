@@ -87,7 +87,6 @@ const STOPWORDS = new Set([
   "ml", "liter", "litre", "liters", "litres",
   "slice", "slices", "piece", "pieces", "serving", "servings",
   "small", "medium", "large",
-  "fresh", "frozen", "cooked", "raw"
 ]);
 
 function tokenizeMealPhrase(phrase) {
