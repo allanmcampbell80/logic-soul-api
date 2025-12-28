@@ -64,6 +64,44 @@ function scoreCandidate(canonicalWords, candidate) {
   if (hits >= 3) score += 0.5;
   if (hits >= 5) score += 0.75;
 
+  // --- Single-token tie-breakers (e.g., "egg" should prefer actual eggs over "egg noodles") ---
+  // When the query is one token, many items can tie on score. Add a couple of light heuristics
+  // to push true "atomic" foods upward.
+  if (canonicalWords && canonicalWords.length === 1) {
+    const token = String(canonicalWords[0] || "").toLowerCase().trim();
+    if (token) {
+      const nn = String(candidate.normalized_name || "").toLowerCase();
+      const cn = String(candidate.normalized_common_name || candidate.common_name || "").toLowerCase();
+      const dp = String(candidate.display_product_name || "").toLowerCase();
+
+      // Strong signal in USDA-ish naming: "egg, whole, raw" (token followed by comma)
+      if (nn.startsWith(`${token},`)) score += 0.6;
+      if (dp.startsWith(`${token},`)) score += 0.2;
+
+      // If the common-name starts with the token but immediately becomes a known compound food,
+      // demote it (e.g., "egg noodles", "egg rolls").
+      const compoundFollowers = new Set([
+        "noodle", "noodles", "pasta", "roll", "rolls", "salad", "soup", "sandwich", "burger",
+        "pizza", "bread", "cake", "cookie", "cookies", "muffin", "muffins", "omelet", "omelette"
+      ]);
+
+      const parts = cn.split(/\s+/).filter(Boolean);
+      if (parts.length >= 2 && parts[0] === token && compoundFollowers.has(parts[1])) {
+        score -= 1.25;
+      }
+
+      // Mild bonus if the normalized name starts with the token as a standalone word.
+      // (Keeps "egg" -> "egg, whole, raw" ahead of "raw whole egg" ties.)
+      if (new RegExp(`^${token}(?:\\b|,)`, "i").test(nn)) score += 0.2;
+    }
+  }
+
+  // If something is explicitly a prepared dish, slightly demote it in general ranking.
+  // (Still searchable via relaxed stages / product searches when needed.)
+  if ((candidate.food_type || "").toLowerCase() === "prepared_dish") {
+    score -= 0.5;
+  }
+
   return score;
 }
 
