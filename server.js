@@ -7,6 +7,7 @@ import { ensureUser, updateUserProfile, patchUserDailyTotals } from "./services/
 import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, deleteUserMeal,} from "./services/userMeals.js";
 import { getFoodDetails } from "./services/foodDetails.js";
 import { getUserFavoritesByUserId, addUserFavoriteByUserId, deleteUserFavoriteByUserId,} from "./services/favorites.js";
+import { storeUserCorrelationPack } from "./services/userAnalysis.js";
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -863,6 +864,40 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
 });
 
 
+//-------------------------------------------------------------------------------------------------------
+// User Analysis
+
+// POST /user-analysis/correlation-pack
+// Receives app-generated daily correlation candidates for later longitudinal analysis
+app.post("/user-analysis/correlation-pack", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const payload = req.body;
+
+    if (!payload || typeof payload !== "object") {
+      return res.status(400).json({ ok: false, error: "Invalid JSON body" });
+    }
+
+    const result = await storeUserCorrelationPack(db, payload);
+
+    return res.json({
+      ok: true,
+      userId: result.userId,
+      dateKey: result.dateKey,
+      storedCount: result.storedCount,
+      message: "Correlation pack stored",
+    });
+  } catch (err) {
+    console.error("[UserAnalysis/CorrelationPack] Error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: err?.message || "Failed to store correlation pack",
+    });
+  }
+});
 //-------------------------------------------------------------------------------------------------------
 
 
