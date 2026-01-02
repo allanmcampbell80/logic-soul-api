@@ -1,3 +1,5 @@
+
+
 import { ObjectId } from "mongodb";
 
 // POST payload shape expected from iOS:
@@ -8,7 +10,7 @@ import { ObjectId } from "mongodb";
 //   candidates: [ { inputKey, outputKey, direction, strength } ]
 // }
 
-const COLLECTION = "user_analysis_correlation_packs";
+const COLLECTION = "user_correlations";
 
 export async function storeUserCorrelationPack(db, payload) {
   const { userId, dateKey, algorithmVersion, candidates } = payload || {};
