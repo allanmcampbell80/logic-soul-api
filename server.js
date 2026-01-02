@@ -8,6 +8,7 @@ import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, delete
 import { getFoodDetails } from "./services/foodDetails.js";
 import { getUserFavoritesByUserId, addUserFavoriteByUserId, deleteUserFavoriteByUserId,} from "./services/favorites.js";
 import { storeUserCorrelationPack } from "./services/userAnalysis.js";
+import { getAwardsForUser, applyAwardEvent } from "./services/awards.js";
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -456,6 +457,9 @@ app.get("/users/:id/favorites", async (req, res) => {
   }
 });
 
+
+//-------------------------------------------------------------------------------------------------------------------
+
 // POST /users/:id/favorites  → adds a favorite to the user's profile (by userId)
 // Body: { foodId, commonName?, brandName? }
 app.post("/users/:id/favorites", async (req, res) => {
@@ -503,6 +507,8 @@ app.post("/users/:id/favorites", async (req, res) => {
   }
 });
 
+//------------------------------------------------------------------------------------------------------------------
+
 // DELETE /users/:id/favorites/:foodId  → removes a favorite from the user's profile (by userId)
 app.delete("/users/:id/favorites/:foodId", async (req, res) => {
   try {
@@ -540,6 +546,85 @@ app.delete("/users/:id/favorites/:foodId", async (req, res) => {
       ok: false,
       error: err?.message || "Failed to delete favorite",
     });
+  }
+});
+
+
+//-------------------------------------------------------------------------------------------------------
+// Awards (stored on the user document)
+
+// GET /users/:id/awards  → returns the user's awards list (by userId)
+// Returns: { ok: true, userId, awards: [...] }
+app.get("/users/:id/awards", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const userId = String(req.params?.id || "").trim();
+    if (!userId || !ObjectId.isValid(userId)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing or invalid ':id' (userId).",
+      });
+    }
+
+    const result = await getAwardsForUser(db, { userId });
+    if (!result) {
+      return res.status(404).json({ ok: false, error: "User not found" });
+    }
+
+    return res.json({ ok: true, userId: result.userId, awards: result.awards || [] });
+  } catch (err) {
+    console.error("[Awards/ListByUserId] Error:", err);
+    return res.status(500).json({ ok: false, error: err?.message || "Failed to fetch awards" });
+  }
+});
+
+
+//-------------------------------------------------------------------------------------------------------------------------
+
+// POST /users/:id/awards/event  → increments a tally and auto-awards if thresholds are crossed.
+// Body: { eventKey: string, amount?: number }
+// Returns: { ok: true, userId, awards: [...] }
+app.post("/users/:id/awards/event", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const userId = String(req.params?.id || "").trim();
+    if (!userId || !ObjectId.isValid(userId)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing or invalid ':id' (userId).",
+      });
+    }
+
+    const eventKey = String(req.body?.eventKey || "").trim();
+    const amountRaw = req.body?.amount;
+    const amount =
+      typeof amountRaw === "number" && Number.isFinite(amountRaw)
+        ? Math.trunc(amountRaw)
+        : 1;
+
+    if (!eventKey) {
+      return res.status(400).json({ ok: false, error: "Missing required field 'eventKey'." });
+    }
+
+    if (amount === 0) {
+      return res.status(400).json({ ok: false, error: "'amount' must be non-zero." });
+    }
+
+    const result = await applyAwardEvent(db, { userId }, { eventKey, amount });
+    if (!result) {
+      return res.status(404).json({ ok: false, error: "User not found" });
+    }
+
+    return res.json({ ok: true, userId: result.userId, awards: result.awards || [] });
+  } catch (err) {
+    console.error("[Awards/EventByUserId] Error:", err);
+    return res.status(500).json({ ok: false, error: err?.message || "Failed to apply award event" });
   }
 });
 
