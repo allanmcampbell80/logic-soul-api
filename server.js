@@ -666,7 +666,17 @@ app.patch("/users/:id/profile", async (req, res) => {
 
 app.post("/users/:id/meals", async (req, res) => {
   try {
-    const userId = req.params.id;
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const userId = String(req.params?.id || "").trim();
+    if (!userId) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing required path parameter ':id' (userId).",
+      });
+    }
 
     // Expecting payload shaped roughly like:
     // {
@@ -689,6 +699,13 @@ app.post("/users/:id/meals", async (req, res) => {
 
     // 1) Log the meal itself
     const result = await logUserMeal(userId, payload);
+
+    // 1b) Increment awards tally for meals logged (best-effort; never block response)
+    applyAwardEvent(db, { userId }, { eventKey: "mealsLogged", amount: 1 }).catch(
+      (err) => {
+        console.error("[Users/Meals] Failed to apply mealsLogged award event:", err);
+      }
+    );
 
     // 2) Kick off daily nutrition total recompute in the background.
     //    We don't block the response on this — it's best-effort.
