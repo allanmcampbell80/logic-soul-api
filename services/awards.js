@@ -9,8 +9,8 @@
  *
  *   awardTallies: {
  *     mealsLogged: 0,
- *     barcodesScanned: 0,
- *     happyDays: 0,
+ *     barcodesAdded: 0,
+ *     dailyCheckins: 0,
  *     ...
  *   }
  *
@@ -47,12 +47,12 @@ const AWARD_RULES = {
     },
   ],
 
-  barcodesScanned: [
+  barcodesAdded: [
     {
       threshold: 1,
       award: {
-        key: "first_barcode_scanned",
-        title: "First Barcode Scanned",
+        key: "first_barcode_added",
+        title: "First Barcode Added",
         subtitle: "You just started building your database.",
         icon: "barcode.viewfinder",
       },
@@ -60,31 +60,40 @@ const AWARD_RULES = {
     {
       threshold: 25,
       award: {
-        key: "twentyfive_barcodes_scanned",
-        title: "25 Barcodes Scanned",
+        key: "twentyfive_barcodes_added",
+        title: "25 Barcodes Added",
         subtitle: "Your food library is growing fast.",
         icon: "barcode.viewfinder",
       },
     },
   ],
 
-  happyDays: [
+  dailyCheckins: [
     {
       threshold: 1,
       award: {
-        key: "first_happy_day",
-        title: "First Happy Day",
-        subtitle: "Log the good days — they matter.",
-        icon: "face.smiling",
+        key: "first_checkin",
+        title: "First Check‑In",
+        subtitle: "Thanks for checking in today.",
+        icon: "calendar.badge.checkmark",
       },
     },
     {
       threshold: 7,
       award: {
-        key: "seven_happy_days",
-        title: "7 Happy Days",
-        subtitle: "A solid streak of better days.",
-        icon: "face.smiling",
+        key: "seven_checkins",
+        title: "7 Check‑Ins",
+        subtitle: "A full week of check‑ins.",
+        icon: "calendar",
+      },
+    },
+    {
+      threshold: 30,
+      award: {
+        key: "thirty_checkins",
+        title: "30 Check‑Ins",
+        subtitle: "A solid habit is forming.",
+        icon: "calendar",
       },
     },
   ],
