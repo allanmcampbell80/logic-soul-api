@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import { findBestMatchesForMealItems } from "./services/mealSearch.js";
+import { buildUserEnrichedDoc, ensureSimpleIngredientsFromParsedList} from "./services/enrich.js";
 import { ensureUser, updateUserProfile, patchUserDailyTotals } from "./services/users.js";
 import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, deleteUserMeal,} from "./services/userMeals.js";
 import { getFoodDetails } from "./services/foodDetails.js";
@@ -43,212 +44,7 @@ async function initMongo() {
   console.log("Connected to MongoDB, collection:", collectionName);
 }
 
-// Helper function to build user enriched doc
-function buildUserEnrichedDoc(payload, headers) {
-  const { rawGPTData } = payload || {};
-  // Accept both client shapes: `user_submission` (snake) and `userSubmission` (camel)
-  const userSubmission = (payload && (payload.user_submission || payload.userSubmission)) || null;
 
-  if (!rawGPTData || typeof rawGPTData !== "object") {
-    throw new Error("Missing or invalid 'rawGPTData' in request body");
-  }
-
-  const rawBarcode =
-    (typeof rawGPTData.barcode === "string" && rawGPTData.barcode) ||
-    headers["x-barcode"] ||
-    headers["X-Barcode"] ||
-    "";
-
-  const cleanedBarcode = rawBarcode.replace(/\D/g, "");
-  const normalizedUPC16 = cleanedBarcode ? cleanedBarcode.padStart(16, "0") : null;
-
-  const incomingSource =
-    rawGPTData.source && typeof rawGPTData.source === "object" ? rawGPTData.source : {};
-
-  const originHeader = headers["x-origin"] || headers["X-Origin"];
-
-  const source = {
-    ...incomingSource,
-    type: incomingSource.type || "gpt_ocr_label",
-    created_via: incomingSource.created_via || "barcode_ocr_ios_user_photo",
-    user_submitted: true,
-    origin:
-      (userSubmission && userSubmission.sourceType) ||
-      originHeader ||
-      "ios_user_barcode_ocr",
-    submitted_at: (() => {
-      const v = userSubmission && (userSubmission.submittedAt || userSubmission.submitted_at);
-      return v ? new Date(v) : new Date();
-    })(),
-    submitted_by_device: (() => {
-      // Prefer explicit user submission device id (camel or snake)
-      const fromUserSubmission =
-        userSubmission && (userSubmission.submittedByDevice || userSubmission.submitted_by_device);
-
-      // Allow top-level body deviceId (some clients may send this)
-      const fromBody = payload && payload.deviceId ? payload.deviceId : null;
-
-      // Allow header fallback
-      const fromHeader =
-        headers["x-device-id"] ||
-        headers["X-Device-Id"] ||
-        headers["x-deviceid"] ||
-        headers["X-DeviceID"];
-
-      const chosen = fromUserSubmission || fromBody || fromHeader || null;
-      return chosen ? String(chosen).trim() : undefined;
-    })(),
-    note: userSubmission && userSubmission.note ? userSubmission.note : undefined,
-  };
-
-  const now = new Date();
-
-  const docToInsert = {
-    ...rawGPTData,
-    type: rawGPTData.type || "product",
-    source,
-    normalized_upc: normalizedUPC16 || rawGPTData.normalized_upc || null,
-    normalized_upc_16: normalizedUPC16 || rawGPTData.normalized_upc_16 || null,
-    original_barcode_raw: rawBarcode || rawGPTData.original_barcode_raw || null,
-    createdAt: now,
-    updatedAt: now,
-  };
-
-  return docToInsert;
-}
-
-// Ensure that each parsed ingredient has a corresponding simple-ingredient entry.
-// Simple ingredients live in the same collection as docs with:
-//   type: "ingredient", is_simple_ingredient: true
-async function ensureSimpleIngredientsFromParsedList(
-  ingredientsParsed,
-  normalizedUPC16,
-  sourceTag
-) {
-  if (!collection) return;
-  if (!Array.isArray(ingredientsParsed) || ingredientsParsed.length === 0) return;
-
-  const now = new Date();
-  const normalized = normalizedUPC16 || null;
-
-  // 1. Skip entirely if we've already indexed simple ingredients for this UPC
-  if (normalized) {
-    const alreadyIndexed = await collection.findOne({
-      normalized_upc_16: normalized,
-      ingredients_indexed_for_simple: true,
-    });
-
-    if (alreadyIndexed) {
-      console.log(
-        "[Ingredients] Simple ingredients already indexed for product",
-        normalized
-      );
-      return;
-    }
-  }
-
-  const normalizeName = (s) => {
-    if (!s || typeof s !== "string") return null;
-    return s
-      .toLowerCase()
-      .replace(/\s+/g, " ")
-      .trim();
-  };
-
-  // Build a unique set of normalized ingredient names
-  const normalizedNamesSet = new Set();
-  for (const raw of ingredientsParsed) {
-    const norm = normalizeName(raw);
-    if (!norm) continue;
-    normalizedNamesSet.add(norm);
-  }
-
-  const normalizedNames = Array.from(normalizedNamesSet);
-  if (normalizedNames.length === 0) return;
-
-  // Look up which of these normalized names already exist as either a confirmed
-  // simple ingredient or a potential simple ingredient stub created from
-  // previous product ingredient parsing.
-  const existing = await collection
-    .find({
-      normalized_name: { $in: normalizedNames },
-      $or: [
-        { is_simple_ingredient: true },
-        { is_potential_simple_ingredient: true },
-      ],
-    })
-    .project({ normalized_name: 1 })
-    .toArray();
-
-  const existingSet = new Set(existing.map((doc) => doc.normalized_name));
-
-  const docsToInsert = [];
-
-  for (const norm of normalizedNames) {
-    if (existingSet.has(norm)) continue; // already have this simple ingredient
-
-    // Find a representative original string to use as the display name
-    const original =
-      ingredientsParsed.find((raw) => normalizeName(raw) === norm) || norm;
-
-    docsToInsert.push({
-      type: "ingredient",
-      // These are *not* confirmed canonical simple ingredients yet.
-      // They are potential simple ingredients inferred from product labels,
-      // and will later go through a verification/enrichment process before
-      // being promoted to is_simple_ingredient: true.
-      is_potential_simple_ingredient: true,
-      enriched: false, // stub; to be enriched by GPT later
-      name: original,
-      normalized_name: norm,
-      first_seen: {
-        normalized_upc_16: normalized,
-        source: sourceTag || "user_enriched_canadian_product",
-        at: now,
-      },
-      createdAt: now,
-      updatedAt: now,
-    });
-  }
-
-  if (docsToInsert.length > 0) {
-    try {
-      await collection.insertMany(docsToInsert, { ordered: false });
-      console.log(
-        "[Ingredients] Inserted",
-        docsToInsert.length,
-        "new simple ingredients from product",
-        normalized
-      );
-    } catch (ingErr) {
-      console.error("[Ingredients] Error inserting simple ingredients:", ingErr);
-    }
-  } else {
-    console.log(
-      "[Ingredients] No new simple ingredients to insert for product",
-      normalized
-    );
-  }
-
-  // 2. Mark this UPC as "indexed for simple ingredients" so we don't do this again
-  if (normalized) {
-    try {
-      await collection.updateMany(
-        { normalized_upc_16: normalized },
-        { $set: { ingredients_indexed_for_simple: true } }
-      );
-      console.log(
-        "[Ingredients] Marked UPC as indexed for simple ingredients:",
-        normalized
-      );
-    } catch (flagErr) {
-      console.error(
-        "[Ingredients] Error marking UPC as ingredients_indexed_for_simple:",
-        flagErr
-      );
-    }
-  }
-}
 
 // --- Express middleware ---
 
@@ -1101,7 +897,7 @@ app.post("/foods/user-enriched", async (req, res) => {
 
     let docToInsert;
     try {
-      docToInsert = buildUserEnrichedDoc(body, req.headers);
+      docToInsert = await buildUserEnrichedDoc(body, req.headers, db);
     } catch (err) {
       if (
         err instanceof Error &&
@@ -1179,7 +975,7 @@ app.post("/user-enriched-food-item", async (req, res) => {
 
     let docToInsert;
     try {
-      docToInsert = buildUserEnrichedDoc(body, req.headers);
+      docToInsert = await buildUserEnrichedDoc(body, req.headers, db);
     } catch (err) {
       if (
         err instanceof Error &&
