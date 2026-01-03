@@ -45,7 +45,9 @@ async function initMongo() {
 
 // Helper function to build user enriched doc
 function buildUserEnrichedDoc(payload, headers) {
-  const { rawGPTData, userSubmission } = payload || {};
+  const { rawGPTData } = payload || {};
+  // Accept both client shapes: `user_submission` (snake) and `userSubmission` (camel)
+  const userSubmission = (payload && (payload.user_submission || payload.userSubmission)) || null;
 
   if (!rawGPTData || typeof rawGPTData !== "object") {
     throw new Error("Missing or invalid 'rawGPTData' in request body");
@@ -74,14 +76,28 @@ function buildUserEnrichedDoc(payload, headers) {
       (userSubmission && userSubmission.sourceType) ||
       originHeader ||
       "ios_user_barcode_ocr",
-    submitted_at:
-      userSubmission && userSubmission.submittedAt
-        ? new Date(userSubmission.submittedAt)
-        : new Date(),
-    submitted_by_device:
-      userSubmission && userSubmission.submittedByDevice
-        ? userSubmission.submittedByDevice
-        : undefined,
+    submitted_at: (() => {
+      const v = userSubmission && (userSubmission.submittedAt || userSubmission.submitted_at);
+      return v ? new Date(v) : new Date();
+    })(),
+    submitted_by_device: (() => {
+      // Prefer explicit user submission device id (camel or snake)
+      const fromUserSubmission =
+        userSubmission && (userSubmission.submittedByDevice || userSubmission.submitted_by_device);
+
+      // Allow top-level body deviceId (some clients may send this)
+      const fromBody = payload && payload.deviceId ? payload.deviceId : null;
+
+      // Allow header fallback
+      const fromHeader =
+        headers["x-device-id"] ||
+        headers["X-Device-Id"] ||
+        headers["x-deviceid"] ||
+        headers["X-DeviceID"];
+
+      const chosen = fromUserSubmission || fromBody || fromHeader || null;
+      return chosen ? String(chosen).trim() : undefined;
+    })(),
     note: userSubmission && userSubmission.note ? userSubmission.note : undefined,
   };
 
@@ -1099,7 +1115,22 @@ app.post("/foods/user-enriched", async (req, res) => {
     const result = await collection.insertOne(docToInsert);
 
     // Awards: count a barcode added when a user-enriched barcode submission is received (best-effort)
-    const submittedDeviceId = docToInsert?.source?.submitted_by_device;
+    const submittedDeviceId =
+      docToInsert?.source?.submitted_by_device ||
+      body?.deviceId ||
+      body?.user_submission?.submittedByDevice ||
+      body?.user_submission?.submitted_by_device ||
+      body?.userSubmission?.submittedByDevice ||
+      body?.userSubmission?.submitted_by_device ||
+      req.headers["x-device-id"] ||
+      req.headers["X-Device-Id"];
+
+    if (submittedDeviceId) {
+      console.log("[Awards] barcodesAdded event; deviceId:", submittedDeviceId);
+    } else {
+      console.warn("[Awards] barcodesAdded NOT applied (missing deviceId)");
+    }
+
     if (db && submittedDeviceId) {
       applyAwardEventByDeviceId(db, submittedDeviceId, "barcodesAdded", 1);
     }
@@ -1162,7 +1193,22 @@ app.post("/user-enriched-food-item", async (req, res) => {
     const result = await collection.insertOne(docToInsert);
 
     // Awards: count a barcode added when a user-enriched barcode submission is received (best-effort)
-    const submittedDeviceId = docToInsert?.source?.submitted_by_device;
+    const submittedDeviceId =
+      docToInsert?.source?.submitted_by_device ||
+      body?.deviceId ||
+      body?.user_submission?.submittedByDevice ||
+      body?.user_submission?.submitted_by_device ||
+      body?.userSubmission?.submittedByDevice ||
+      body?.userSubmission?.submitted_by_device ||
+      req.headers["x-device-id"] ||
+      req.headers["X-Device-Id"];
+
+    if (submittedDeviceId) {
+      console.log("[Awards] barcodesAdded event; deviceId:", submittedDeviceId);
+    } else {
+      console.warn("[Awards] barcodesAdded NOT applied (missing deviceId)");
+    }
+
     if (db && submittedDeviceId) {
       applyAwardEventByDeviceId(db, submittedDeviceId, "barcodesAdded", 1);
     }
