@@ -353,6 +353,23 @@ async function chooseBestCanadianDocForUPC(normalizedUPC16) {
 
 //-----------------------------------------------------------------------------------------------------
 
+// Helper: Apply an award event by deviceId (best-effort, async)
+async function applyAwardEventByDeviceId(db, deviceId, eventKey, amount = 1) {
+  try {
+    const cleaned = String(deviceId || "").trim();
+    if (!db || !cleaned) return;
+
+    const usersCol = db.collection("users");
+    const user = await usersCol.findOne({ deviceId: cleaned }, { projection: { _id: 1 } });
+    if (!user?._id) return;
+
+    const userId = String(user._id);
+    await applyAwardEvent(db, { userId }, { eventKey, amount });
+  } catch (err) {
+    console.error(`[Awards] Failed applyAwardEventByDeviceId (${eventKey}):`, err);
+  }
+}
+
 // Health check
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "LogicSoul API" });
@@ -954,6 +971,30 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
     const { dateKey, patch, timezone } = req.body || {};
 
     const result = await patchUserDailyTotals(db, userId, dateKey, patch, timezone);
+
+    // Awards: Daily check-in tally (best-effort, de-duped per dateKey)
+    try {
+      if (db && result?.ok && dateKey && ObjectId.isValid(String(userId))) {
+        const usersCol = db.collection("users");
+
+        // De-dupe per dateKey so edits don't double-count
+        const dedupe = await usersCol.updateOne(
+          { _id: new ObjectId(String(userId)), dailyCheckinDateKeys: { $ne: String(dateKey) } },
+          { $addToSet: { dailyCheckinDateKeys: String(dateKey) } }
+        );
+
+        if (dedupe?.modifiedCount === 1) {
+          applyAwardEvent(db, { userId: String(userId) }, { eventKey: "dailyCheckins", amount: 1 }).catch(
+            (err) => {
+              console.error("[Users/DailyTotals/CheckIn] Failed to apply dailyCheckins award event:", err);
+            }
+          );
+        }
+      }
+    } catch (awardErr) {
+      console.error("[Users/DailyTotals/CheckIn] Daily check-in award hook error:", awardErr);
+    }
+
     return res.json(result);
   } catch (err) {
     console.error("[Users/DailyTotals/CheckIn] Error:", err);
@@ -1057,6 +1098,12 @@ app.post("/foods/user-enriched", async (req, res) => {
 
     const result = await collection.insertOne(docToInsert);
 
+    // Awards: count a barcode added when a user-enriched barcode submission is received (best-effort)
+    const submittedDeviceId = docToInsert?.source?.submitted_by_device;
+    if (db && submittedDeviceId) {
+      applyAwardEventByDeviceId(db, submittedDeviceId, "barcodesAdded", 1);
+    }
+
     // Ensure all parsed ingredients have simple-ingredient stubs for later enrichment
     if (
       Array.isArray(docToInsert.ingredients_parsed) &&
@@ -1113,6 +1160,12 @@ app.post("/user-enriched-food-item", async (req, res) => {
     }
 
     const result = await collection.insertOne(docToInsert);
+
+    // Awards: count a barcode added when a user-enriched barcode submission is received (best-effort)
+    const submittedDeviceId = docToInsert?.source?.submitted_by_device;
+    if (db && submittedDeviceId) {
+      applyAwardEventByDeviceId(db, submittedDeviceId, "barcodesAdded", 1);
+    }
 
     // Ensure all parsed ingredients have simple-ingredient stubs for later enrichment
     if (
