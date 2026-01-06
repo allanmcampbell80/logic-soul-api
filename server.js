@@ -4,7 +4,7 @@ import cors from "cors";
 import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import { findBestMatchesForMealItems } from "./services/mealSearch.js";
 import { buildUserEnrichedDoc, ensureSimpleIngredientsFromParsedList} from "./services/enrich.js";
-import { ensureUser, updateUserProfile, patchUserDailyTotals } from "./services/users.js";
+import { ensureUser, updateUserProfile, patchUserDailyTotals, addRecoveryEmail, verifyRecoveryEmail, recoverAccount} from "./services/users.js";
 import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, deleteUserMeal,} from "./services/userMeals.js";
 import { getFoodDetails } from "./services/foodDetails.js";
 import { getUserFavoritesByUserId, addUserFavoriteByUserId, deleteUserFavoriteByUserId,} from "./services/favorites.js";
@@ -457,6 +457,8 @@ app.post("/users/:id/awards/event", async (req, res) => {
   }
 });
 
+//---------------------------------------------------------------------------------------------------------------------
+
 // POST /users/ensure → create or update a user by deviceId
 app.post("/users/ensure", async (req, res) => {
   try {
@@ -487,6 +489,107 @@ app.patch("/users/:id/profile", async (req, res) => {
       ok: false,
       error: err.message || "Failed to update user profile",
     });
+  }
+});
+
+
+//--------------------------------------------------------------------------------------------------------
+// Account Recovery (placeholders)
+// These routes are scaffolding only. Server-side implementation will be added in services/users.js.
+
+// POST /users/:id/recovery-email
+// Body: { email: string }
+// Intended: store only a server-side hash (HMAC) + send verification code/link.
+app.post("/users/:id/recovery-email", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+    const userId = String(req.params?.id || "").trim();
+    const email = String(req.body?.email || "").trim();
+
+    if (!userId || !ObjectId.isValid(userId)) {
+      return res.status(400).json({ ok: false, error: "Missing or invalid ':id' (userId)." });
+    }
+
+    if (!email) {
+      return res.status(400).json({ ok: false, error: "Missing required field 'email'." });
+    }
+
+    const user = await addRecoveryEmail(db, userId, email);
+    return res.json({ ok: true, user });
+  } catch (err) {
+    console.error("[Users/RecoveryEmail/Add] Error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to add recovery email" });
+  }
+});
+
+//--------------------------------------------------------------------------------------------------
+
+// POST /users/:id/recovery-email/verify
+// Body: { code: string }
+// Intended: verify code and mark recovery email as verified.
+app.post("/users/:id/recovery-email/verify", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+    const userId = String(req.params?.id || "").trim();
+    const code = String(req.body?.code || "").trim();
+
+    if (!userId || !ObjectId.isValid(userId)) {
+      return res.status(400).json({ ok: false, error: "Missing or invalid ':id' (userId)." });
+    }
+
+    if (!code) {
+      return res.status(400).json({ ok: false, error: "Missing required field 'code'." });
+    }
+
+    const user = await verifyRecoveryEmail(db, userId, code);
+    return res.json({ ok: true, user });
+  } catch (err) {
+    console.error("[Users/RecoveryEmail/Verify] Error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to verify recovery email" });
+  }
+});
+
+//----------------------------------------------------------------------------------------------------
+
+// POST /users/recover
+// Body: { email: string, code: string }
+// Intended: find user by email hash + code, then attach/replace deviceId (or return a session).
+app.post("/users/recover", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+    const email = String(req.body?.email || "").trim();
+    const code = String(req.body?.code || "").trim();
+
+    if (!email) {
+      return res.status(400).json({ ok: false, error: "Missing required field 'email'." });
+    }
+
+    if (!code) {
+      return res.status(400).json({ ok: false, error: "Missing required field 'code'." });
+    }
+
+    const newDeviceId = String(
+      req.body?.deviceId ||
+      req.headers["x-device-id"] ||
+      req.headers["X-Device-Id"] ||
+      ""
+    ).trim();
+
+    if (!newDeviceId) {
+      return res.status(400).json({ ok: false, error: "Missing required field 'deviceId' (or X-Device-Id header)." });
+    }
+
+    const user = await recoverAccount(db, email, code, newDeviceId);
+    return res.json({ ok: true, user });
+  } catch (err) {
+    console.error("[Users/Recover] Error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to recover account" });
   }
 });
 
