@@ -1,5 +1,6 @@
 // services/users.js
 import { ObjectId } from "mongodb";
+import crypto from "crypto";
 
 function mapUserDoc(user) {
   if (!user) return null;
@@ -18,6 +19,9 @@ function mapUserDoc(user) {
     weightKg: user.weightKg ?? null,
     fingerScalePoints: user.fingerScalePoints ?? null,
     fingerScaleCm: user.fingerScaleCm ?? null,
+    recoveryEmailVerified: user.recoveryEmailVerified ?? null,
+    recoveryEmailAddedAt: user.recoveryEmailAddedAt ?? null,
+    recoveryEmailLastVerifiedAt: user.recoveryEmailLastVerifiedAt ?? null,
   };
 }
 
@@ -230,4 +234,245 @@ export async function patchUserDailyTotals(db, userId, dateKey, patch, timezone)
     modifiedCount: result.modifiedCount,
     updatedAt: now,
   };
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Account recovery helpers (never store plaintext email)
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function requireRecoverySecret() {
+  const secret = process.env.RECOVERY_EMAIL_HMAC_SECRET;
+  if (!secret || typeof secret !== "string" || !secret.trim()) {
+    const err = new Error("Missing server env var RECOVERY_EMAIL_HMAC_SECRET");
+    err.statusCode = 500;
+    throw err;
+  }
+  return secret;
+}
+
+function hmacEmail(email) {
+  const secret = requireRecoverySecret();
+  const normalized = normalizeEmail(email);
+  return crypto.createHmac("sha256", secret).update(normalized, "utf8").digest("hex");
+}
+
+function random6DigitCode() {
+  const n = crypto.randomInt(0, 1000000);
+  return String(n).padStart(6, "0");
+}
+
+function hashCode(code) {
+  const secret = requireRecoverySecret();
+  return crypto.createHmac("sha256", secret).update(String(code || "").trim(), "utf8").digest("hex");
+}
+
+//--------------------------------------------------------------------------------------------------------
+// Account recovery endpoints (service layer)
+
+export async function addRecoveryEmail(db, userId, email) {
+  if (!db) throw new Error("DB not ready");
+
+  if (!userId || typeof userId !== "string" || !ObjectId.isValid(userId)) {
+    const err = new Error("Missing or invalid 'userId'");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const normalized = normalizeEmail(email);
+  if (!normalized || !normalized.includes("@")) {
+    const err = new Error("Missing or invalid 'email'");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const usersCollection = db.collection("users");
+  const now = new Date();
+
+  const existingUser = await usersCollection.findOne({ _id: new ObjectId(userId) });
+  if (!existingUser) {
+    const err = new Error("User not found");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const recoveryEmailHash = hmacEmail(normalized);
+  const sameEmailAsBefore = existingUser.recoveryEmailHash === recoveryEmailHash;
+  const wasVerified = existingUser.recoveryEmailVerified === true;
+
+  const code = random6DigitCode();
+  const codeHash = hashCode(code);
+  const expiresAt = new Date(now.getTime() + 15 * 60 * 1000); // 15 minutes
+
+  const result = await usersCollection.findOneAndUpdate(
+    { _id: new ObjectId(userId) },
+    {
+      $set: {
+        recoveryEmailHash,
+        recoveryEmailVerified: sameEmailAsBefore && wasVerified ? true : false,
+        recoveryEmailAddedAt: sameEmailAsBefore ? (existingUser.recoveryEmailAddedAt ?? now) : now,
+        recoveryEmailPendingCodeHash: codeHash,
+        recoveryEmailPendingCodeExpiresAt: expiresAt,
+        lastSeenAt: now,
+      },
+    },
+    { returnDocument: "after" }
+  );
+
+  // TODO: send via email provider (SendGrid/Mailgun/etc).
+  // Dev-only:
+  console.log(
+    "[addRecoveryEmail] userId=",
+    userId,
+    " emailHash=",
+    recoveryEmailHash,
+    " code=",
+    code,
+    " expiresAt=",
+    expiresAt.toISOString()
+  );
+
+  return mapUserDoc(result.value);
+}
+
+export async function verifyRecoveryEmail(db, userId, code) {
+  if (!db) throw new Error("DB not ready");
+
+  if (!userId || typeof userId !== "string" || !ObjectId.isValid(userId)) {
+    const err = new Error("Missing or invalid 'userId'");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const cleanCode = String(code || "").trim();
+  if (!cleanCode) {
+    const err = new Error("Missing or invalid 'code'");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const usersCollection = db.collection("users");
+  const now = new Date();
+
+  const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
+  if (!user) {
+    const err = new Error("User not found");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  if (!user.recoveryEmailHash) {
+    const err = new Error("No recovery email set for this account");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const expiresAt = user.recoveryEmailPendingCodeExpiresAt
+    ? new Date(user.recoveryEmailPendingCodeExpiresAt)
+    : null;
+
+  if (!user.recoveryEmailPendingCodeHash || !expiresAt || now > expiresAt) {
+    const err = new Error("Verification code expired or not requested");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const providedHash = hashCode(cleanCode);
+  if (providedHash !== user.recoveryEmailPendingCodeHash) {
+    const err = new Error("Invalid verification code");
+    err.statusCode = 401;
+    throw err;
+  }
+
+  const result = await usersCollection.findOneAndUpdate(
+    { _id: new ObjectId(userId) },
+    {
+      $set: {
+        recoveryEmailVerified: true,
+        recoveryEmailLastVerifiedAt: now,
+        lastSeenAt: now,
+      },
+      $unset: {
+        recoveryEmailPendingCodeHash: "",
+        recoveryEmailPendingCodeExpiresAt: "",
+      },
+    },
+    { returnDocument: "after" }
+  );
+
+  return mapUserDoc(result.value);
+}
+
+export async function recoverAccount(db, email, code, newDeviceId) {
+  if (!db) throw new Error("DB not ready");
+
+  const normalized = normalizeEmail(email);
+  if (!normalized || !normalized.includes("@")) {
+    const err = new Error("Missing or invalid 'email'");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const cleanCode = String(code || "").trim();
+  if (!cleanCode) {
+    const err = new Error("Missing or invalid 'code'");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const usersCollection = db.collection("users");
+  const now = new Date();
+
+  const emailHash = hmacEmail(normalized);
+  const user = await usersCollection.findOne({
+    recoveryEmailHash: emailHash,
+    recoveryEmailVerified: true,
+  });
+
+  if (!user) {
+    const err = new Error("Account not found or recovery email not verified");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const expiresAt = user.recoveryEmailPendingCodeExpiresAt
+    ? new Date(user.recoveryEmailPendingCodeExpiresAt)
+    : null;
+
+  if (!user.recoveryEmailPendingCodeHash || !expiresAt || now > expiresAt) {
+    const err = new Error("Recovery code expired or not requested");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const providedHash = hashCode(cleanCode);
+  if (providedHash !== user.recoveryEmailPendingCodeHash) {
+    const err = new Error("Invalid recovery code");
+    err.statusCode = 401;
+    throw err;
+  }
+
+  const setObj = {
+    lastSeenAt: now,
+  };
+
+  if (typeof newDeviceId === "string" && newDeviceId.trim()) {
+    setObj.deviceId = newDeviceId.trim();
+  }
+
+  const result = await usersCollection.findOneAndUpdate(
+    { _id: user._id },
+    {
+      $set: setObj,
+      $unset: {
+        recoveryEmailPendingCodeHash: "",
+        recoveryEmailPendingCodeExpiresAt: "",
+      },
+    },
+    { returnDocument: "after" }
+  );
+
+  return mapUserDoc(result.value);
 }
