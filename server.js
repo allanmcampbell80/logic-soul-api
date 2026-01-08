@@ -883,9 +883,45 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
     }
 
     const userId = req.params.id;
-    const { dateKey, patch, timezone } = req.body || {};
+    const { dateKey, patch, timezone, pain_regions, painRegions } = req.body || {};
+    const painRegionsPayload = (pain_regions && typeof pain_regions === "object")
+      ? pain_regions
+      : (painRegions && typeof painRegions === "object")
+        ? painRegions
+        : null;
 
     const result = await patchUserDailyTotals(db, userId, dateKey, patch, timezone);
+
+    // Persist detailed pain region intensities (optional)
+    // Stored separately from totals so we don't mix numeric totals with object fields.
+    try {
+      if (db && result?.ok && painRegionsPayload && dateKey) {
+        const totalsCol = db.collection("user_daily_totals");
+
+        // Match the same userId type strategy used elsewhere (ObjectId when possible)
+        let userIdValue = userId;
+        if (typeof userId === "string" && /^[a-fA-F0-9]{24}$/.test(userId)) {
+          try {
+            userIdValue = new ObjectId(userId);
+          } catch {
+            userIdValue = userId;
+          }
+        }
+
+        await totalsCol.updateOne(
+          { userId: userIdValue, dateKey: String(dateKey) },
+          {
+            $set: {
+              "checkin.pain_regions": painRegionsPayload,
+              updatedAt: new Date(),
+            },
+          }
+        );
+      }
+    } catch (painErr) {
+      console.error("[Users/DailyTotals/CheckIn] Failed to store pain_regions:", painErr);
+      // Best-effort: do not fail the main check-in patch if this optional field fails.
+    }
 
     // Awards: Daily check-in tally (best-effort, de-duped per dateKey)
     try {
