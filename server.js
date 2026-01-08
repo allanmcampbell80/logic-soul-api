@@ -883,19 +883,25 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
     }
 
     const userId = req.params.id;
-    const { dateKey, patch, timezone, pain_regions, painRegions } = req.body || {};
+    const { dateKey, patch, timezone, pain_regions, painRegions, pain_details, painDetails } = req.body || {};
     const painRegionsPayload = (pain_regions && typeof pain_regions === "object")
       ? pain_regions
       : (painRegions && typeof painRegions === "object")
         ? painRegions
         : null;
 
+    const painDetailsPayload = (pain_details && typeof pain_details === "object")
+      ? pain_details
+      : (painDetails && typeof painDetails === "object")
+        ? painDetails
+        : null;
+
     const result = await patchUserDailyTotals(db, userId, dateKey, patch, timezone);
 
-    // Persist detailed pain region intensities (optional)
+    // Persist detailed pain region/detailed intensities (optional)
     // Stored separately from totals so we don't mix numeric totals with object fields.
     try {
-      if (db && result?.ok && painRegionsPayload && dateKey) {
+      if (db && result?.ok && (painRegionsPayload || painDetailsPayload) && dateKey) {
         const totalsCol = db.collection("user_daily_totals");
 
         // Match the same userId type strategy used elsewhere (ObjectId when possible)
@@ -908,18 +914,19 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
           }
         }
 
+        const setPatch = { updatedAt: new Date() };
+        if (painRegionsPayload) setPatch["checkin.pain_regions"] = painRegionsPayload;
+        if (painDetailsPayload) setPatch["checkin.pain_details"] = painDetailsPayload;
+
         await totalsCol.updateOne(
           { userId: userIdValue, dateKey: String(dateKey) },
           {
-            $set: {
-              "checkin.pain_regions": painRegionsPayload,
-              updatedAt: new Date(),
-            },
+            $set: setPatch,
           }
         );
       }
     } catch (painErr) {
-      console.error("[Users/DailyTotals/CheckIn] Failed to store pain_regions:", painErr);
+      console.error("[Users/DailyTotals/CheckIn] Failed to store pain_regions/pain_details:", painErr);
       // Best-effort: do not fail the main check-in patch if this optional field fails.
     }
 
