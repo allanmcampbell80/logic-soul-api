@@ -873,6 +873,121 @@ app.get("/users/:id/daily-totals", async (req, res) => {
 
 //------------------------------------------------------------------------------------------------------------
 
+// PATCH /users/:id/daily-totals/hydration
+// Body: { dateKey: "YYYY-MM-DD", delta_ml?: number, water_from_drinks_ml?: number, timezone?: "America/Toronto" }
+// Updates drink-water (mL) without triggering daily check-in logic.
+// Keeps totals.water_total_ml in sync: water_from_food_ml + water_from_drinks_ml.
+app.patch("/users/:id/daily-totals/hydration", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const userId = req.params.id;
+    const { dateKey, delta_ml, deltaMl, water_from_drinks_ml, waterFromDrinksMl, timezone } = req.body || {};
+
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "Missing required path parameter ':id' (userId)." });
+    }
+
+    const dk = String(dateKey || "").trim();
+    if (!dk || !/^\d{4}-\d{2}-\d{2}$/.test(dk)) {
+      return res.status(400).json({ ok: false, error: "Missing or invalid required field 'dateKey' (expected YYYY-MM-DD)." });
+    }
+
+    // Prefer delta updates for frequent interactions.
+    const deltaRaw = (typeof delta_ml === "number" ? delta_ml : (typeof deltaMl === "number" ? deltaMl : null));
+    const absRaw = (typeof water_from_drinks_ml === "number" ? water_from_drinks_ml : (typeof waterFromDrinksMl === "number" ? waterFromDrinksMl : null));
+
+    const hasDelta = typeof deltaRaw === "number" && Number.isFinite(deltaRaw);
+    const hasAbs = typeof absRaw === "number" && Number.isFinite(absRaw);
+
+    if (!hasDelta && !hasAbs) {
+      return res.status(400).json({ ok: false, error: "Provide either 'delta_ml' (number) or 'water_from_drinks_ml' (number)." });
+    }
+
+    // Sanity: hydration cannot be negative.
+    if (hasDelta && deltaRaw < 0) {
+      return res.status(400).json({ ok: false, error: "'delta_ml' must be >= 0." });
+    }
+    if (hasAbs && absRaw < 0) {
+      return res.status(400).json({ ok: false, error: "'water_from_drinks_ml' must be >= 0." });
+    }
+
+    const totalsCol = db.collection("user_daily_totals");
+
+    // Match the same userId type strategy used elsewhere (ObjectId when possible)
+    let userIdValue = userId;
+    if (typeof userId === "string" && /^[a-fA-F0-9]{24}$/.test(userId)) {
+      try {
+        userIdValue = new ObjectId(userId);
+      } catch {
+        userIdValue = userId;
+      }
+    }
+
+    const now = new Date();
+    const tz = timezone != null ? String(timezone).trim() : null;
+
+    // Aggregation pipeline update so we can atomically update drinks + recompute total.
+    // - If delta is provided: drinks = drinks + delta
+    // - Else: drinks = abs
+    // Then: total = food + drinks
+    const drinksExpr = hasDelta
+      ? { $add: [ { $ifNull: ["$totals.water_from_drinks_ml", 0] }, deltaRaw ] }
+      : absRaw;
+
+    const updatePipeline = [
+      {
+        $set: {
+          userId: userIdValue,
+          dateKey: dk,
+          updatedAt: now,
+          ...(tz ? { timezone: tz } : {}),
+          "totals.water_from_drinks_ml": drinksExpr,
+        },
+      },
+      {
+        $set: {
+          "totals.water_total_ml": {
+            $add: [
+              { $ifNull: ["$totals.water_from_food_ml", 0] },
+              { $ifNull: ["$totals.water_from_drinks_ml", 0] },
+            ],
+          },
+        },
+      },
+      {
+        $setOnInsert: {
+          createdAt: now,
+        },
+      },
+    ];
+
+    await totalsCol.updateOne(
+      { userId: userIdValue, dateKey: dk },
+      updatePipeline,
+      { upsert: true }
+    );
+
+    const doc = await totalsCol.findOne({ userId: userIdValue, dateKey: dk });
+
+    return res.json({
+      ok: true,
+      dateKey: dk,
+      timezone: doc?.timezone || tz || null,
+      totals: doc?.totals || {},
+      updatedAt: doc?.updatedAt || now,
+      createdAt: doc?.createdAt || null,
+    });
+  } catch (err) {
+    console.error("[Users/DailyTotals/Hydration] Error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to update hydration" });
+  }
+});
+
+//------------------------------------------------------------------------------------------------------------
+
 // PATCH /users/:id/daily-totals/checkin
 // Body: { dateKey: "YYYY-MM-DD", patch: { "checkin_mood": 6, ... }, timezone?: "America/Toronto" }
 // Merges patch keys into doc.totals.* and upserts the daily totals doc if missing.
