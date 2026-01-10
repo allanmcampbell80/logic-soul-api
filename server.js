@@ -629,6 +629,23 @@ app.post("/users/:id/meals", async (req, res) => {
     // }
     const payload = req.body;
 
+    // Helper: detect drink-water logged as a meal item
+    function extractDrinkWaterMlFromPayload(payload) {
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      let total = 0;
+      for (const it of items) {
+        const name = String(it?.name || "").trim().toLowerCase();
+        const unit = String(it?.quantityUnit || it?.unit || "").trim().toLowerCase();
+        const qty = typeof it?.quantity === "number" ? it.quantity : null;
+        if (name === "water" && unit === "ml" && Number.isFinite(qty) && qty > 0) {
+          total += qty;
+        }
+      }
+      return total;
+    }
+
+    const drinkWaterMl = extractDrinkWaterMlFromPayload(payload);
+
     // 1) Log the meal itself
     const result = await logUserMeal(userId, payload);
 
@@ -639,10 +656,21 @@ app.post("/users/:id/meals", async (req, res) => {
       }
     );
 
+    // 1c) Optional awards hook: drink-water logged (best-effort; never block response)
+    // Note: This is a simple per-event tally (1 per water log). Daily hydration streak awards
+    // should still be derived from daily totals.
+    if (drinkWaterMl > 0) {
+      applyAwardEvent(db, { userId }, { eventKey: "waterLogged", amount: 1 }).catch((err) => {
+        console.error("[Users/Meals] Failed to apply waterLogged award event:", err);
+      });
+    }
+
     // 2) Kick off daily nutrition total recompute in the background.
     //    We don't block the response on this — it's best-effort.
-    if (db && result && result.dateKey) {
-      recomputeDailyNutritionTotals(db, userId, result.dateKey).catch((err) => {
+    const recomputeDateKey = (result && result.dateKey) ? result.dateKey : (payload && payload.dateKey ? payload.dateKey : null);
+
+    if (db && recomputeDateKey) {
+      recomputeDailyNutritionTotals(db, userId, recomputeDateKey).catch((err) => {
         console.error(
           "[Users/Meals] Failed to recompute daily nutrition totals:",
           err
@@ -651,7 +679,7 @@ app.post("/users/:id/meals", async (req, res) => {
     } else {
       console.warn(
         "[Users/Meals] Skipping recomputeDailyNutritionTotals — missing db or dateKey",
-        { hasDb: !!db, hasDateKey: !!(result && result.dateKey) }
+        { hasDb: !!db, hasDateKey: !!recomputeDateKey }
       );
     }
 
@@ -873,115 +901,6 @@ app.get("/users/:id/daily-totals", async (req, res) => {
 
 //------------------------------------------------------------------------------------------------------------
 
-// PATCH /users/:id/daily-totals/hydration
-// Body: { dateKey: "YYYY-MM-DD", delta_ml?: number, water_from_drinks_ml?: number, timezone?: "America/Toronto" }
-// Updates drink-water (mL) without triggering daily check-in logic.
-// Keeps totals.water_total_ml in sync: water_from_food_ml + water_from_drinks_ml.
-app.patch("/users/:id/daily-totals/hydration", async (req, res) => {
-  try {
-    if (!db) {
-      return res.status(500).json({ ok: false, error: "DB not ready" });
-    }
-
-    const userId = req.params.id;
-    const { dateKey, delta_ml, deltaMl, water_from_drinks_ml, waterFromDrinksMl, timezone } = req.body || {};
-
-    if (!userId) {
-      return res.status(400).json({ ok: false, error: "Missing required path parameter ':id' (userId)." });
-    }
-
-    const dk = String(dateKey || "").trim();
-    if (!dk || !/^\d{4}-\d{2}-\d{2}$/.test(dk)) {
-      return res.status(400).json({ ok: false, error: "Missing or invalid required field 'dateKey' (expected YYYY-MM-DD)." });
-    }
-
-    // Prefer delta updates for frequent interactions.
-    const deltaRaw = (typeof delta_ml === "number" ? delta_ml : (typeof deltaMl === "number" ? deltaMl : null));
-    const absRaw = (typeof water_from_drinks_ml === "number" ? water_from_drinks_ml : (typeof waterFromDrinksMl === "number" ? waterFromDrinksMl : null));
-
-    const hasDelta = typeof deltaRaw === "number" && Number.isFinite(deltaRaw);
-    const hasAbs = typeof absRaw === "number" && Number.isFinite(absRaw);
-
-    if (!hasDelta && !hasAbs) {
-      return res.status(400).json({ ok: false, error: "Provide either 'delta_ml' (number) or 'water_from_drinks_ml' (number)." });
-    }
-
-    // Sanity: hydration cannot be negative.
-    if (hasDelta && deltaRaw < 0) {
-      return res.status(400).json({ ok: false, error: "'delta_ml' must be >= 0." });
-    }
-    if (hasAbs && absRaw < 0) {
-      return res.status(400).json({ ok: false, error: "'water_from_drinks_ml' must be >= 0." });
-    }
-
-    const totalsCol = db.collection("user_daily_totals");
-
-    // Match the same userId type strategy used elsewhere (ObjectId when possible)
-    let userIdValue = userId;
-    if (typeof userId === "string" && /^[a-fA-F0-9]{24}$/.test(userId)) {
-      try {
-        userIdValue = new ObjectId(userId);
-      } catch {
-        userIdValue = userId;
-      }
-    }
-
-    const now = new Date();
-    const tz = timezone != null ? String(timezone).trim() : null;
-
-    // Aggregation pipeline update so we can atomically update drinks + recompute total.
-    // - If delta is provided: drinks = drinks + delta
-    // - Else: drinks = abs
-    // Then: total = food + drinks
-    const drinksExpr = hasDelta
-      ? { $add: [ { $ifNull: ["$totals.water_from_drinks_ml", 0] }, deltaRaw ] }
-      : absRaw;
-
-    const updatePipeline = [
-      {
-        $set: {
-          userId: userIdValue,
-          dateKey: dk,
-          updatedAt: now,
-          createdAt: { $ifNull: ["$createdAt", now] },
-          ...(tz ? { timezone: tz } : {}),
-          "totals.water_from_drinks_ml": drinksExpr,
-        },
-      },
-      {
-        $set: {
-          "totals.water_total_ml": {
-            $add: [
-              { $ifNull: ["$totals.water_from_food_ml", 0] },
-              { $ifNull: ["$totals.water_from_drinks_ml", 0] },
-            ],
-          },
-        },
-      },
-    ];
-
-    await totalsCol.updateOne(
-      { userId: userIdValue, dateKey: dk },
-      updatePipeline,
-      { upsert: true }
-    );
-
-    const doc = await totalsCol.findOne({ userId: userIdValue, dateKey: dk });
-
-    return res.json({
-      ok: true,
-      dateKey: dk,
-      timezone: doc?.timezone || tz || null,
-      totals: doc?.totals || {},
-      updatedAt: doc?.updatedAt || now,
-      createdAt: doc?.createdAt || null,
-    });
-  } catch (err) {
-    console.error("[Users/DailyTotals/Hydration] Error:", err?.message || err);
-    if (err?.stack) console.error(err.stack);
-    return res.status(500).json({ ok: false, error: "Failed to update hydration" });
-  }
-});
 
 //------------------------------------------------------------------------------------------------------------
 
