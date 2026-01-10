@@ -186,13 +186,27 @@ export async function logUserMeal(userId, payload) {
 
   const safeItems = Array.isArray(items)
     ? items.map((it) => {
-        const qty = it.quantity && typeof it.quantity === "object" ? it.quantity : null;
+        // quantity can be either the newer object shape ({ value, unit, isEstimate, ... })
+        // or a legacy/simple number (e.g. 250) with quantityUnit (e.g. "ml").
+        let qty = null;
+        if (it.quantity && typeof it.quantity === "object") {
+          qty = it.quantity;
+        } else if (typeof it.quantity === "number" && Number.isFinite(it.quantity)) {
+          qty = {
+            value: it.quantity,
+            unit: it.quantityUnit || "g",
+            isEstimate: false,
+            basis: "ui",
+            confidence: 1,
+          };
+        }
+
         const qtyUnit = qty?.unit ? String(qty.unit) : null;
 
         return {
           name: it.name,
           foodId: it.foodId ? new ObjectId(it.foodId) : null,
-          quantity: qty, // expected shape: { value, unit, isEstimate, ... }
+          quantity: qty, // { value, unit, isEstimate, ... }
 
           // Keep a convenient top-level unit for older clients / debugging.
           // Prefer the explicit quantity.unit when present.
@@ -207,7 +221,7 @@ export async function logUserMeal(userId, payload) {
     userId: userObjectId,
     loggedAt: loggedAtDate,
     dateKey,
-    timezone: timezone || "UTC",
+    timezone: timezone || user.timezone || "UTC",
     description: description || null,
     items: safeItems,
     createdAt: now,
@@ -250,6 +264,29 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     .find({ userId: userObjectId, dateKey })
     .toArray();
 
+  // --- Drink water from "water" meal items (ml) ---
+  // We treat any meal item with name "water" and unit "ml" as drink-water.
+  // This allows hydration drops to be logged as meal events (timestamped) while still
+  // rolling up into daily totals as water_from_drinks_ml.
+  function sumDrinkWaterMl(meals) {
+    if (!Array.isArray(meals)) return 0;
+    let total = 0;
+    for (const meal of meals) {
+      const items = Array.isArray(meal?.items) ? meal.items : [];
+      for (const it of items) {
+        const name = String(it?.name || "").trim().toLowerCase();
+        const unit = String(it?.quantity?.unit || it?.quantityUnit || "").trim().toLowerCase();
+        const qty = typeof it?.quantity?.value === "number" ? it.quantity.value : null;
+        if (name === "water" && unit === "ml" && Number.isFinite(qty) && qty > 0) {
+          total += qty;
+        }
+      }
+    }
+    return total;
+  }
+
+  const waterFromDrinksMl = sumDrinkWaterMl(meals);
+
   if (!meals.length) {
     console.log("[recomputeDailyNutritionTotals] no meals for this date, upserting zero totals");
 
@@ -264,6 +301,8 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
       {
         $set: {
           totals: emptyTotals,
+          "totals.water_from_drinks_ml": 0,
+          "totals.water_total_ml": 0,
           timezone: "UTC",
           updatedAt: now,
         },
@@ -386,6 +425,8 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
       {
         $set: {
           totals: emptyTotals,
+          "totals.water_from_drinks_ml": 0,
+          "totals.water_total_ml": 0,
           timezone: "UTC",
           updatedAt: now,
         },
@@ -455,6 +496,10 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
   for (const [k, v] of Object.entries(totals)) {
     if (Object.is(v, -0)) totals[k] = 0;
   }
+
+  // Merge drink-water into daily totals and keep a combined total.
+  totals.water_from_drinks_ml = Math.round((waterFromDrinksMl + Number.EPSILON) * 10) / 10;
+  totals.water_total_ml = (Number(totals.water_from_food_ml) || 0) + (Number(totals.water_from_drinks_ml) || 0);
 
   // 7. Upsert into user_daily_totals
   const now = new Date();
