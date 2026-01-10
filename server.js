@@ -943,6 +943,7 @@ app.patch("/users/:id/daily-totals/hydration", async (req, res) => {
           userId: userIdValue,
           dateKey: dk,
           updatedAt: now,
+          createdAt: { $ifNull: ["$createdAt", now] },
           ...(tz ? { timezone: tz } : {}),
           "totals.water_from_drinks_ml": drinksExpr,
         },
@@ -955,11 +956,6 @@ app.patch("/users/:id/daily-totals/hydration", async (req, res) => {
               { $ifNull: ["$totals.water_from_drinks_ml", 0] },
             ],
           },
-        },
-      },
-      {
-        $setOnInsert: {
-          createdAt: now,
         },
       },
     ];
@@ -981,7 +977,8 @@ app.patch("/users/:id/daily-totals/hydration", async (req, res) => {
       createdAt: doc?.createdAt || null,
     });
   } catch (err) {
-    console.error("[Users/DailyTotals/Hydration] Error:", err);
+    console.error("[Users/DailyTotals/Hydration] Error:", err?.message || err);
+    if (err?.stack) console.error(err.stack);
     return res.status(500).json({ ok: false, error: "Failed to update hydration" });
   }
 });
