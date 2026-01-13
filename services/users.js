@@ -236,6 +236,254 @@ export async function patchUserDailyTotals(db, userId, dateKey, patch, timezone)
   };
 }
 
+// -------------------------------
+// Energy samples (time-series)
+
+function isValidDateKey(v) {
+  return typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+}
+
+function cleanEnergySamples(raw) {
+  const arr = Array.isArray(raw) ? raw : [];
+
+  const cleaned = [];
+  for (const s of arr) {
+    const ts = typeof s?.ts === "number" ? s.ts : Number(s?.ts);
+    const lvlRaw = typeof s?.level === "number" ? s.level : Number(s?.level);
+
+    if (!Number.isFinite(ts) || !Number.isFinite(lvlRaw)) continue;
+
+    const level = Math.trunc(lvlRaw);
+    if (level < 1 || level > 10) continue;
+
+    cleaned.push({ ts, level });
+  }
+
+  // Sort by time
+  cleaned.sort((a, b) => a.ts - b.ts);
+
+  // De-dupe by ts (keep last)
+  const byTs = new Map();
+  for (const s of cleaned) {
+    byTs.set(s.ts, s);
+  }
+
+  return Array.from(byTs.values()).sort((a, b) => a.ts - b.ts);
+}
+
+export async function storeUserEnergySamples(db, userId, arg2, arg3, arg4) {
+  // Support both call styles:
+  //  - storeUserEnergySamples(db, userId, { dateKey, timezone, samples })
+  //  - storeUserEnergySamples(db, userId, dateKey, samples, timezone)
+  let dateKey;
+  let timezone;
+  let samples;
+
+  if (arg2 && typeof arg2 === "object" && !Array.isArray(arg2)) {
+    dateKey = arg2.dateKey;
+    timezone = arg2.timezone;
+    samples = arg2.samples;
+  } else {
+    dateKey = arg2;
+    samples = arg3;
+    timezone = arg4;
+  }
+  if (!db) throw new Error("DB not ready");
+
+  const cleanedUserId = String(userId || "").trim();
+  if (!cleanedUserId || !ObjectId.isValid(cleanedUserId)) {
+    const err = new Error("Missing or invalid userId");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const dk = String(dateKey || "").trim();
+  if (!isValidDateKey(dk)) {
+    const err = new Error("Missing or invalid dateKey");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const cleanedSamples = cleanEnergySamples(samples);
+  if (!cleanedSamples.length) {
+    const err = new Error("No valid energy samples");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const now = new Date();
+
+  // Average (mean), rounded to 2 decimals
+  const sum = cleanedSamples.reduce((acc, s) => acc + s.level, 0);
+  const avg = Math.round((sum / cleanedSamples.length) * 100) / 100;
+
+  const latest = cleanedSamples[cleanedSamples.length - 1];
+
+  const totalsCol = db.collection("user_daily_totals");
+  const userIdValue = new ObjectId(cleanedUserId);
+
+  const setPatch = {
+    updatedAt: now,
+
+    // Raw time-series
+    "checkin.energy_samples": cleanedSamples,
+    "checkin.energy_samples_updated_at": now,
+
+    // Derived snapshot values for convenience
+    "checkin.energy_avg": avg,
+    "checkin.energy_latest": latest.level,
+    "checkin.energy_latest_ts": latest.ts,
+    "checkin.energy_sample_count": cleanedSamples.length,
+    "checkin.energy_updated_at": now,
+
+    // Totals fields consumed by UI/rings
+    // (We keep legacy fields too, but `totals.checkin_energy` is the primary daily snapshot.)
+    "totals.checkin_energy": avg,
+    "totals.checkin_energy_avg": avg,
+    "totals.checkin_energy_latest": latest.level,
+    "totals.checkin_energy_latest_ts": latest.ts,
+  };
+
+  const tz = typeof timezone === "string" ? timezone.trim() : "";
+  if (tz) {
+    setPatch.timezone = tz;
+  }
+
+  await totalsCol.updateOne(
+    { userId: userIdValue, dateKey: dk },
+    {
+      $setOnInsert: {
+        userId: userIdValue,
+        dateKey: dk,
+        createdAt: now,
+        totals: {},
+        checkin: {},
+      },
+      $set: setPatch,
+    },
+    { upsert: true }
+  );
+
+  return {
+    ok: true,
+    userId: cleanedUserId,
+    dateKey: dk,
+    timezone: tz || null,
+    storedCount: cleanedSamples.length,
+    avg,
+    latestLevel: latest.level,
+  };
+}
+
+//--------------------------------------------------------------------------------------------------
+// Energy snapshots / finalization
+//
+// Computes a running average from checkin.energy_samples and writes it into totals.
+// If `finalize: true`, marks the day as finalized (idempotent).
+export async function upsertUserEnergySnapshotForDate(db, userId, dateKey, options = {}) {
+  if (!db) throw new Error("DB not ready");
+
+  const cleanedUserId = String(userId || "").trim();
+  if (!cleanedUserId) {
+    const err = new Error("Missing userId");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const dk = String(dateKey || "").trim();
+  if (!isValidDateKey(dk)) {
+    const err = new Error("Missing or invalid dateKey");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const finalize = options && options.finalize === true;
+
+  const totalsCol = db.collection("user_daily_totals");
+  const userIdValue = coerceUserId(cleanedUserId);
+
+  const doc = await totalsCol.findOne({ userId: userIdValue, dateKey: dk });
+  const samples = Array.isArray(doc?.checkin?.energy_samples) ? doc.checkin.energy_samples : [];
+
+  if (!samples.length) {
+    return { ok: true, updated: false, reason: "no_samples", userId: cleanedUserId, dateKey: dk };
+  }
+
+  // Clean and clamp samples defensively
+  const cleaned = [];
+  for (const s of samples) {
+    const ts = typeof s?.ts === "number" ? s.ts : Number(s?.ts);
+    const lvl = typeof s?.level === "number" ? s.level : Number(s?.level);
+    if (!Number.isFinite(ts) || !Number.isFinite(lvl)) continue;
+    const level = Math.max(1, Math.min(10, Math.trunc(lvl)));
+    cleaned.push({ ts, level });
+  }
+
+  if (!cleaned.length) {
+    return { ok: true, updated: false, reason: "no_valid_samples", userId: cleanedUserId, dateKey: dk };
+  }
+
+  cleaned.sort((a, b) => a.ts - b.ts);
+
+  const sum = cleaned.reduce((acc, s) => acc + s.level, 0);
+  const avg = Math.round((sum / cleaned.length) * 100) / 100;
+  const min = cleaned.reduce((acc, s) => Math.min(acc, s.level), cleaned[0].level);
+  const max = cleaned.reduce((acc, s) => Math.max(acc, s.level), cleaned[0].level);
+  const latest = cleaned[cleaned.length - 1];
+
+  const now = new Date();
+
+  // Idempotent finalization
+  if (finalize && doc?.checkin?.energy_finalized_at) {
+    return { ok: true, updated: false, reason: "already_finalized", userId: cleanedUserId, dateKey: dk };
+  }
+
+  const setPatch = {
+    updatedAt: now,
+
+    // Derived checkin fields
+    "checkin.energy_avg": avg,
+    "checkin.energy_min": min,
+    "checkin.energy_max": max,
+    "checkin.energy_latest": latest.level,
+    "checkin.energy_latest_ts": latest.ts,
+    "checkin.energy_sample_count": cleaned.length,
+    "checkin.energy_updated_at": now,
+
+    // Totals snapshot
+    "totals.checkin_energy": avg,
+  };
+
+  if (finalize) {
+    setPatch["checkin.energy_finalized_at"] = now;
+    setPatch["checkin.energy_finalized_version"] = 1;
+  }
+
+  await totalsCol.updateOne(
+    { userId: userIdValue, dateKey: dk },
+    {
+      $set: setPatch,
+      $setOnInsert: {
+        createdAt: now,
+        userId: userIdValue,
+        dateKey: dk,
+      },
+    },
+    { upsert: true }
+  );
+
+  return {
+    ok: true,
+    updated: true,
+    finalize,
+    userId: cleanedUserId,
+    dateKey: dk,
+    avg,
+    min,
+    max,
+    count: cleaned.length,
+  };
+}
 //--------------------------------------------------------------------------------------------------------
 // Account recovery helpers (never store plaintext email)
 
