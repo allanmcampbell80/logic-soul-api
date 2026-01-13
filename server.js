@@ -4,7 +4,7 @@ import cors from "cors";
 import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import { findBestMatchesForMealItems } from "./services/mealSearch.js";
 import { buildUserEnrichedDoc, ensureSimpleIngredientsFromParsedList} from "./services/enrich.js";
-import { ensureUser, updateUserProfile, patchUserDailyTotals, addRecoveryEmail, verifyRecoveryEmail, recoverAccount} from "./services/users.js";
+import { ensureUser, updateUserProfile, patchUserDailyTotals, storeUserEnergySamples, upsertUserEnergySnapshotForDate, addRecoveryEmail, verifyRecoveryEmail, recoverAccount} from "./services/users.js";
 import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, deleteUserMeal,} from "./services/userMeals.js";
 import { getFoodDetails } from "./services/foodDetails.js";
 import { getUserFavoritesByUserId, addUserFavoriteByUserId, deleteUserFavoriteByUserId,} from "./services/favorites.js";
@@ -123,6 +123,8 @@ function scoreCanadianDoc(doc) {
 
   return score;
 }
+
+//----------------------------------------------------------------------------------------------------------
 
 async function chooseBestCanadianDocForUPC(normalizedUPC16) {
   if (!collection) return null;
@@ -825,6 +827,42 @@ app.delete("/users/:id/meals/:mealId", async (req, res) => {
 
 //------------------------------------------------------------------------------------------------
 
+// --- UserId coercion helper (string/ObjectId) ---
+function coerceUserIdValue(userId) {
+  let userIdValue = userId;
+  if (typeof userId === "string" && /^[a-fA-F0-9]{24}$/.test(userId)) {
+    try {
+      userIdValue = new ObjectId(userId);
+    } catch {
+      userIdValue = userId;
+    }
+  }
+  return userIdValue;
+}
+
+// --- DateKey helpers (UTC-safe) ---
+function isValidDateKey(dateKey) {
+  return typeof dateKey === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateKey);
+}
+
+function dateFromDateKeyUTC(dateKey) {
+  // dateKey is YYYY-MM-DD
+  const [y, m, d] = dateKey.split("-").map((v) => parseInt(v, 10));
+  return new Date(Date.UTC(y, (m || 1) - 1, d || 1));
+}
+
+function dateKeyFromDateUTC(dt) {
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(dt.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function addDaysDateKeyUTC(dateKey, days) {
+  const dt = dateFromDateKeyUTC(dateKey);
+  dt.setUTCDate(dt.getUTCDate() + (Number(days) || 0));
+  return dateKeyFromDateUTC(dt);
+}
 // GET /users/:id/daily-totals?dateKey=YYYY-MM-DD
 // Returns the user's daily nutrition totals from the user_daily_totals collection.
 app.get("/users/:id/daily-totals", async (req, res) => {
@@ -846,7 +884,7 @@ app.get("/users/:id/daily-totals", async (req, res) => {
       });
     }
 
-    if (!dateKey || typeof dateKey !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+    if (!isValidDateKey(dateKey)) {
       return res.status(400).json({
         ok: false,
         error: "Missing or invalid required query parameter 'dateKey' (expected YYYY-MM-DD).",
@@ -856,14 +894,22 @@ app.get("/users/:id/daily-totals", async (req, res) => {
     // Collection lives in the same DB as everything else
     const totalsCol = db.collection("user_daily_totals");
 
-    // Attempt to coerce userId into an ObjectId if it looks like one
-    let userIdValue = userId;
-    if (typeof userId === "string" && /^[a-fA-F0-9]{24}$/.test(userId)) {
-      try {
-        userIdValue = new ObjectId(userId);
-      } catch {
-        userIdValue = userId;
+    // Use helper to coerce userId to ObjectId if needed
+    const userIdValue = coerceUserIdValue(userId);
+
+    // Energy: Snapshot today's average energy into totals, and finalize yesterday.
+    // Best-effort: never fail the daily totals request if this helper fails.
+    try {
+      // Snapshot the requested day (often "today") so UI can render a running average.
+      await upsertUserEnergySnapshotForDate(db, userIdValue, String(dateKey), { finalize: false });
+
+      // Finalize yesterday once we are looking at today.
+      const yesterdayKey = addDaysDateKeyUTC(String(dateKey), -1);
+      if (isValidDateKey(yesterdayKey)) {
+        await upsertUserEnergySnapshotForDate(db, userIdValue, String(yesterdayKey), { finalize: true });
       }
+    } catch (energySnapErr) {
+      console.error("[Users/DailyTotals] Energy snapshot/finalize failed (best-effort):", energySnapErr);
     }
 
     const doc = await totalsCol.findOne({
@@ -914,6 +960,7 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
     }
 
     const userId = req.params.id;
+    const userIdValue = coerceUserIdValue(userId);
     const { dateKey, patch, timezone, pain_regions, painRegions, pain_details, painDetails } = req.body || {};
     const painRegionsPayload = (pain_regions && typeof pain_regions === "object")
       ? pain_regions
@@ -929,21 +976,24 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
 
     const result = await patchUserDailyTotals(db, userId, dateKey, patch, timezone);
 
+    // Energy: whenever we patch a check-in, also snapshot the running energy average for that date.
+    // Best-effort: do not fail the check-in if snapshotting fails.
+    try {
+      if (dateKey && isValidDateKey(String(dateKey))) {
+        await upsertUserEnergySnapshotForDate(db, userIdValue, String(dateKey), { finalize: false });
+      }
+    } catch (energySnapErr) {
+      console.error("[Users/DailyTotals/CheckIn] Energy snapshot failed (best-effort):", energySnapErr);
+    }
+
     // Persist detailed pain region/detailed intensities (optional)
     // Stored separately from totals so we don't mix numeric totals with object fields.
     try {
       if (db && result?.ok && (painRegionsPayload || painDetailsPayload) && dateKey) {
         const totalsCol = db.collection("user_daily_totals");
 
-        // Match the same userId type strategy used elsewhere (ObjectId when possible)
-        let userIdValue = userId;
-        if (typeof userId === "string" && /^[a-fA-F0-9]{24}$/.test(userId)) {
-          try {
-            userIdValue = new ObjectId(userId);
-          } catch {
-            userIdValue = userId;
-          }
-        }
+        // userIdValue is already set above using coerceUserIdValue
+        // (coercion already exists above)
 
         const setPatch = { updatedAt: new Date() };
         if (painRegionsPayload) setPatch["checkin.pain_regions"] = painRegionsPayload;
@@ -991,6 +1041,66 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
     return res.status(status).json({
       ok: false,
       error: err.message || "Failed to update daily check-in",
+    });
+  }
+});
+
+//------------------------------------------------------------------------------------------------------------
+// POST /users/:id/daily-totals/energy-samples
+// Body: { dateKey: "YYYY-MM-DD", samples: [{ ts: number, level: number }], timezone?: "America/Toronto" }
+// Appends cleaned energy samples to checkin.energy_samples and updates derived totals.
+app.post("/users/:id/daily-totals/energy-samples", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const userId = String(req.params?.id || "").trim();
+    const userIdValue = coerceUserIdValue(userId);
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "Missing required path parameter ':id' (userId)." });
+    }
+
+    const { dateKey, samples, timezone } = req.body || {};
+
+    if (!dateKey || typeof dateKey !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing or invalid required field 'dateKey' (expected YYYY-MM-DD).",
+      });
+    }
+
+    // Accept either an array of samples or a single sample object
+    let samplesArr = [];
+    if (Array.isArray(samples)) {
+      samplesArr = samples;
+    } else if (samples && typeof samples === "object") {
+      samplesArr = [samples];
+    }
+
+    if (!Array.isArray(samplesArr) || samplesArr.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing required field 'samples' (expected a non-empty array).",
+      });
+    }
+
+    const tz = typeof timezone === "string" && timezone.trim().length > 0 ? timezone.trim() : null;
+
+    const result = await storeUserEnergySamples(db, userId, String(dateKey), samplesArr, tz);
+    // Energy: after storing samples, snapshot the running average into totals.
+    try {
+      await upsertUserEnergySnapshotForDate(db, userIdValue, String(dateKey), { finalize: false });
+    } catch (energySnapErr) {
+      console.error("[Users/DailyTotals/EnergySamples] Energy snapshot failed (best-effort):", energySnapErr);
+    }
+    return res.json(result);
+  } catch (err) {
+    console.error("[Users/DailyTotals/EnergySamples] Error:", err);
+    const status = err?.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err?.message || "Failed to store energy samples",
     });
   }
 });
