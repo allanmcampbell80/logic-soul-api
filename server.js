@@ -1087,7 +1087,7 @@ app.post("/users/:id/daily-totals/energy-samples", async (req, res) => {
 
     const tz = typeof timezone === "string" && timezone.trim().length > 0 ? timezone.trim() : null;
 
-    const result = await storeUserEnergySamples(db, userId, String(dateKey), samplesArr, tz);
+    const result = await storeUserEnergySamples(db, userIdValue, String(dateKey), samplesArr, tz);
     // Energy: after storing samples, snapshot the running average into totals.
     try {
       await upsertUserEnergySnapshotForDate(db, userIdValue, String(dateKey), { finalize: false });
