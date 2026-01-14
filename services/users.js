@@ -329,8 +329,6 @@ export async function storeUserEnergySamples(db, userId, arg2, arg3, arg4) {
         userId: userIdValue,
         dateKey: dk,
         createdAt: now,
-        totals: {},
-        checkin: {},
       },
       $set: {
         updatedAt: now,
