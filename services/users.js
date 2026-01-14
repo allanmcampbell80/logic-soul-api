@@ -288,6 +288,7 @@ export async function storeUserEnergySamples(db, userId, arg2, arg3, arg4) {
     samples = arg3;
     timezone = arg4;
   }
+
   if (!db) throw new Error("DB not ready");
 
   const cleanedUserId = String(userId || "").trim();
@@ -312,43 +313,15 @@ export async function storeUserEnergySamples(db, userId, arg2, arg3, arg4) {
   }
 
   const now = new Date();
-
-  // Average (mean), rounded to 2 decimals
-  const sum = cleanedSamples.reduce((acc, s) => acc + s.level, 0);
-  const avg = Math.round((sum / cleanedSamples.length) * 100) / 100;
-
-  const latest = cleanedSamples[cleanedSamples.length - 1];
-
   const totalsCol = db.collection("user_daily_totals");
   const userIdValue = new ObjectId(cleanedUserId);
 
-  const setPatch = {
-    updatedAt: now,
-
-    // Raw time-series
-    "checkin.energy_samples": cleanedSamples,
-    "checkin.energy_samples_updated_at": now,
-
-    // Derived snapshot values for convenience
-    "checkin.energy_avg": avg,
-    "checkin.energy_latest": latest.level,
-    "checkin.energy_latest_ts": latest.ts,
-    "checkin.energy_sample_count": cleanedSamples.length,
-    "checkin.energy_updated_at": now,
-
-    // Totals fields consumed by UI/rings
-    // (We keep legacy fields too, but `totals.checkin_energy` is the primary daily snapshot.)
-    "totals.checkin_energy": avg,
-    "totals.checkin_energy_avg": avg,
-    "totals.checkin_energy_latest": latest.level,
-    "totals.checkin_energy_latest_ts": latest.ts,
-  };
-
   const tz = typeof timezone === "string" ? timezone.trim() : "";
-  if (tz) {
-    setPatch.timezone = tz;
-  }
 
+  // IMPORTANT:
+  // We append samples so we don't accidentally drop earlier samples if the client
+  // only submits a delta (new samples) during a flush.
+  // De-dupe and clamping are handled later by upsertUserEnergySnapshotForDate.
   await totalsCol.updateOne(
     { userId: userIdValue, dateKey: dk },
     {
@@ -359,7 +332,14 @@ export async function storeUserEnergySamples(db, userId, arg2, arg3, arg4) {
         totals: {},
         checkin: {},
       },
-      $set: setPatch,
+      $set: {
+        updatedAt: now,
+        ...(tz ? { timezone: tz } : {}),
+        "checkin.energy_samples_updated_at": now,
+      },
+      $push: {
+        "checkin.energy_samples": { $each: cleanedSamples },
+      },
     },
     { upsert: true }
   );
@@ -369,9 +349,7 @@ export async function storeUserEnergySamples(db, userId, arg2, arg3, arg4) {
     userId: cleanedUserId,
     dateKey: dk,
     timezone: tz || null,
-    storedCount: cleanedSamples.length,
-    avg,
-    latestLevel: latest.level,
+    appendedCount: cleanedSamples.length,
   };
 }
 
