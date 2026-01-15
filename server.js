@@ -631,6 +631,22 @@ app.post("/users/:id/meals", async (req, res) => {
     // }
     const payload = req.body;
 
+    // Enforce logical-day dateKey (3am→3am) from now on.
+    // If the client supplied a valid dateKey, we respect it.
+    // Otherwise compute from loggedAt+timezone using the cutoff rule.
+    const tzFromPayload = typeof payload?.timezone === "string" ? payload.timezone.trim() : "";
+    const tzFromHeader = String(req.headers["x-timezone"] || req.headers["X-Timezone"] || "").trim();
+    const timezone = tzFromPayload || tzFromHeader || "America/Toronto";
+
+    // Normalize/ensure loggedAt exists (store as ISO so Mongo sorting is stable)
+    const loggedAt = payload?.loggedAt ? payload.loggedAt : new Date().toISOString();
+    payload.loggedAt = loggedAt;
+    payload.timezone = timezone;
+
+    if (!isValidDateKey(payload?.dateKey)) {
+      payload.dateKey = computeLogicalDateKeyFromLoggedAt(loggedAt, timezone, 3);
+    }
+
     // Helper: detect drink-water logged as a meal item
     function extractDrinkWaterMlFromPayload(payload) {
       const items = Array.isArray(payload?.items) ? payload.items : [];
@@ -863,6 +879,60 @@ function addDaysDateKeyUTC(dateKey, days) {
   dt.setUTCDate(dt.getUTCDate() + (Number(days) || 0));
   return dateKeyFromDateUTC(dt);
 }
+
+// --- Logical day helpers (local timezone with cutoff hour) ---
+// A "logical day" is defined as [cutoffHour..cutoffHour) in the user's timezone.
+// Example (cutoffHour=3): 1:30am Jan 15 local → counts toward Jan 14.
+function safeTimeZone(tz) {
+  const s = typeof tz === "string" ? tz.trim() : "";
+  return s.length > 0 ? s : null;
+}
+
+function dateKeyFromInstantInTimeZone(dt, timeZone) {
+  // dt is a Date representing an instant.
+  // Return YYYY-MM-DD in the provided IANA timezone.
+  try {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+
+    const parts = fmt.formatToParts(dt);
+    const y = parts.find((p) => p.type === "year")?.value;
+    const m = parts.find((p) => p.type === "month")?.value;
+    const d = parts.find((p) => p.type === "day")?.value;
+    if (y && m && d) return `${y}-${m}-${d}`;
+
+    const s = fmt.format(dt);
+    if (typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  } catch {
+    // ignore
+  }
+
+  // Fallback: UTC dateKey
+  return dateKeyFromDateUTC(dt);
+}
+
+function computeLogicalDateKeyFromLoggedAt(loggedAt, timezone, cutoffHour = 3) {
+  // loggedAt can be ISO string, number (ms), or Date.
+  let dt;
+  if (loggedAt instanceof Date) dt = loggedAt;
+  else if (typeof loggedAt === "number" && Number.isFinite(loggedAt)) dt = new Date(loggedAt);
+  else dt = new Date(String(loggedAt || ""));
+
+  if (!dt || Number.isNaN(dt.getTime())) {
+    dt = new Date();
+  }
+
+  const tz = safeTimeZone(timezone);
+
+  // Shift the instant backwards by cutoffHour so that the dateKey boundary becomes cutoffHour.
+  const shifted = new Date(dt.getTime() - (Number(cutoffHour) || 0) * 60 * 60 * 1000);
+
+  return tz ? dateKeyFromInstantInTimeZone(shifted, tz) : dateKeyFromDateUTC(shifted);
+}
 // GET /users/:id/daily-totals?dateKey=YYYY-MM-DD
 // Returns the user's daily nutrition totals from the user_daily_totals collection.
 app.get("/users/:id/daily-totals", async (req, res) => {
@@ -962,6 +1032,19 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
     const userId = req.params.id;
     const userIdValue = coerceUserIdValue(userId);
     const { dateKey, patch, timezone, pain_regions, painRegions, pain_details, painDetails } = req.body || {};
+
+    // Enforce logical-day dateKey (3am→3am) from now on for check-ins.
+    // If the client provided a valid dateKey, keep it. Otherwise compute from now + timezone.
+    const tzCheckinRaw = typeof timezone === "string" ? timezone.trim() : "";
+    const tzHeader = String(req.headers["x-timezone"] || req.headers["X-Timezone"] || "").trim();
+    const tzCheckin = tzCheckinRaw || tzHeader || "America/Toronto";
+
+    // Check-ins don't include a timestamp today, so we use 'now' for the logical-day key.
+    // (Client can still explicitly send dateKey to override.)
+    const dateKeyResolved = isValidDateKey(dateKey)
+      ? String(dateKey)
+      : computeLogicalDateKeyFromLoggedAt(new Date(), tzCheckin, 3);
+
     const painRegionsPayload = (pain_regions && typeof pain_regions === "object")
       ? pain_regions
       : (painRegions && typeof painRegions === "object")
@@ -974,13 +1057,13 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
         ? painDetails
         : null;
 
-    const result = await patchUserDailyTotals(db, userId, dateKey, patch, timezone);
+    const result = await patchUserDailyTotals(db, userId, dateKeyResolved, patch, tzCheckin);
 
     // Energy: whenever we patch a check-in, also snapshot the running energy average for that date.
     // Best-effort: do not fail the check-in if snapshotting fails.
     try {
-      if (dateKey && isValidDateKey(String(dateKey))) {
-        await upsertUserEnergySnapshotForDate(db, userIdValue, String(dateKey), { finalize: false });
+      if (dateKeyResolved && isValidDateKey(String(dateKeyResolved))) {
+        await upsertUserEnergySnapshotForDate(db, userIdValue, String(dateKeyResolved), { finalize: false });
       }
     } catch (energySnapErr) {
       console.error("[Users/DailyTotals/CheckIn] Energy snapshot failed (best-effort):", energySnapErr);
@@ -989,7 +1072,7 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
     // Persist detailed pain region/detailed intensities (optional)
     // Stored separately from totals so we don't mix numeric totals with object fields.
     try {
-      if (db && result?.ok && (painRegionsPayload || painDetailsPayload) && dateKey) {
+      if (db && result?.ok && (painRegionsPayload || painDetailsPayload) && dateKeyResolved) {
         const totalsCol = db.collection("user_daily_totals");
 
         // userIdValue is already set above using coerceUserIdValue
@@ -1000,7 +1083,7 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
         if (painDetailsPayload) setPatch["checkin.pain_details"] = painDetailsPayload;
 
         await totalsCol.updateOne(
-          { userId: userIdValue, dateKey: String(dateKey) },
+          { userId: userIdValue, dateKey: String(dateKeyResolved) },
           {
             $set: setPatch,
           }
@@ -1013,13 +1096,13 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
 
     // Awards: Daily check-in tally (best-effort, de-duped per dateKey)
     try {
-      if (db && result?.ok && dateKey && ObjectId.isValid(String(userId))) {
+      if (db && result?.ok && dateKeyResolved && ObjectId.isValid(String(userId))) {
         const usersCol = db.collection("users");
 
         // De-dupe per dateKey so edits don't double-count
         const dedupe = await usersCol.updateOne(
-          { _id: new ObjectId(String(userId)), dailyCheckinDateKeys: { $ne: String(dateKey) } },
-          { $addToSet: { dailyCheckinDateKeys: String(dateKey) } }
+          { _id: new ObjectId(String(userId)), dailyCheckinDateKeys: { $ne: String(dateKeyResolved) } },
+          { $addToSet: { dailyCheckinDateKeys: String(dateKeyResolved) } }
         );
 
         if (dedupe?.modifiedCount === 1) {
@@ -1063,12 +1146,13 @@ app.post("/users/:id/daily-totals/energy-samples", async (req, res) => {
 
     const { dateKey, samples, timezone } = req.body || {};
 
-    if (!dateKey || typeof dateKey !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing or invalid required field 'dateKey' (expected YYYY-MM-DD).",
-      });
-    }
+    // Enforce logical-day dateKey (3am→3am) from now on for energy samples.
+    // If a valid dateKey is provided, keep it. Otherwise compute from the latest sample ts (or now) + timezone.
+    const tzEnergyRaw = typeof timezone === "string" ? timezone.trim() : "";
+    const tzHeaderEnergy = String(req.headers["x-timezone"] || req.headers["X-Timezone"] || "").trim();
+    const tzEnergy = tzEnergyRaw || tzHeaderEnergy || "America/Toronto";
+
+    // dateKey is optional going forward; if missing/invalid we compute it below.
 
     // Accept either an array of samples or a single sample object
     let samplesArr = [];
@@ -1085,12 +1169,27 @@ app.post("/users/:id/daily-totals/energy-samples", async (req, res) => {
       });
     }
 
-    const tz = typeof timezone === "string" && timezone.trim().length > 0 ? timezone.trim() : null;
+    // Pick the latest sample timestamp as the best representation of "when" this batch belongs.
+    const latestTs = samplesArr.reduce((acc, s) => {
+      const ts = typeof s?.ts === "number" && Number.isFinite(s.ts) ? s.ts : null;
+      if (ts == null) return acc;
+      return acc == null ? ts : Math.max(acc, ts);
+    }, null);
 
-    const result = await storeUserEnergySamples(db, userIdValue, String(dateKey), samplesArr, tz);
+    const dateKeyResolved = isValidDateKey(dateKey)
+      ? String(dateKey)
+      : computeLogicalDateKeyFromLoggedAt(
+          latestTs != null ? new Date(latestTs) : new Date(),
+          tzEnergy,
+          3
+        );
+
+    const tz = tzEnergy; // keep existing service signature (string or null)
+
+    const result = await storeUserEnergySamples(db, userIdValue, String(dateKeyResolved), samplesArr, tz);
     // Energy: after storing samples, snapshot the running average into totals.
     try {
-      await upsertUserEnergySnapshotForDate(db, userIdValue, String(dateKey), { finalize: false });
+      await upsertUserEnergySnapshotForDate(db, userIdValue, String(dateKeyResolved), { finalize: false });
     } catch (energySnapErr) {
       console.error("[Users/DailyTotals/EnergySamples] Energy snapshot failed (best-effort):", energySnapErr);
     }
