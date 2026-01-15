@@ -5,6 +5,62 @@ import { usersCollection, userMealsCollection, foodItemsCollection } from "./mon
 // userMealsCollection should be initialized in mongo.js like:
 // export const userMealsCollection = db.collection("user_meals");
 
+// --- DateKey helpers (timezone-aware logical day) ---
+function isValidDateKey(dateKey) {
+  return typeof dateKey === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateKey);
+}
+
+function safeTimeZone(tz) {
+  const s = typeof tz === "string" ? tz.trim() : "";
+  return s.length > 0 ? s : null;
+}
+
+function dateKeyFromInstantInTimeZone(dt, timeZone) {
+  // dt is a Date representing an instant.
+  // Return YYYY-MM-DD in the provided IANA timezone.
+  try {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+
+    const parts = fmt.formatToParts(dt);
+    const y = parts.find((p) => p.type === "year")?.value;
+    const m = parts.find((p) => p.type === "month")?.value;
+    const d = parts.find((p) => p.type === "day")?.value;
+    if (y && m && d) return `${y}-${m}-${d}`;
+
+    const s = fmt.format(dt);
+    if (typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  } catch {
+    // ignore
+  }
+
+  // Fallback: UTC dateKey
+  return dt.toISOString().slice(0, 10);
+}
+
+function computeLogicalDateKeyFromLoggedAt(loggedAt, timezone, cutoffHour = 3) {
+  // loggedAt can be ISO string, number (ms), or Date.
+  let dt;
+  if (loggedAt instanceof Date) dt = loggedAt;
+  else if (typeof loggedAt === "number" && Number.isFinite(loggedAt)) dt = new Date(loggedAt);
+  else dt = new Date(String(loggedAt || ""));
+
+  if (!dt || Number.isNaN(dt.getTime())) {
+    dt = new Date();
+  }
+
+  const tz = safeTimeZone(timezone);
+
+  // Shift the instant backwards by cutoffHour so that the dateKey boundary becomes cutoffHour.
+  const shifted = new Date(dt.getTime() - (Number(cutoffHour) || 0) * 60 * 60 * 1000);
+
+  return tz ? dateKeyFromInstantInTimeZone(shifted, tz) : shifted.toISOString().slice(0, 10);
+}
+
 // Nutrient keys from foods.nutrients[].key that we want to aggregate
 const DAILY_PANEL_NUTRIENTS = {
   // Calories / energy
@@ -182,7 +238,13 @@ export async function logUserMeal(userId, payload) {
   } = payload;
 
   const loggedAtDate = loggedAt ? new Date(loggedAt) : now;
-  const dateKey = (payload.dateKey) || loggedAtDate.toISOString().slice(0, 10); // "YYYY-MM-DD"
+
+  // Use the same logical-day rule as the API (3am→3am). If the client/server already
+  // provided a valid dateKey, keep it. Otherwise compute from loggedAt + timezone.
+  const tzForMeal = timezone || user.timezone || "UTC";
+  const dateKey = isValidDateKey(payload?.dateKey)
+    ? String(payload.dateKey)
+    : computeLogicalDateKeyFromLoggedAt(loggedAtDate, tzForMeal, 3);
 
   const safeItems = Array.isArray(items)
     ? items.map((it) => {
@@ -221,7 +283,7 @@ export async function logUserMeal(userId, payload) {
     userId: userObjectId,
     loggedAt: loggedAtDate,
     dateKey,
-    timezone: timezone || user.timezone || "UTC",
+    timezone: tzForMeal,
     description: description || null,
     items: safeItems,
     createdAt: now,
