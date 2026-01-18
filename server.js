@@ -1638,9 +1638,10 @@ app.post("/api/meal-search", async (req, res) => {
       });
     }
 
-    const result = await findBestMatchesForMealItems(db, parsedMeal, {
-      maxPerItem: 5,
-    });
+  const result = await findBestMatchesForMealItems(db, parsedMeal, {
+    mode: "fast",
+    maxPerItem: 5,
+  });
 
     return res.json({
       ok: true,
@@ -1652,6 +1653,73 @@ app.post("/api/meal-search", async (req, res) => {
       ok: false,
       error: "Meal search failed",
       details: err.message || String(err),
+    });
+  }
+});
+
+//--------------------------------------------------------------------------------------------------
+
+// POST /api/meal-search/options
+// Accepts a single parsed meal item and returns a larger set of DB matches.
+// Intended for the client "Edit" flow (lazy-load alternatives).
+// Body: { rawText?: string, mealType?: string, item: { originalPhrase, canonicalName, kind?, mealType? } }
+app.post("/api/meal-search/options", async (req, res) => {
+  try {
+    if (!db || !collection) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const body = req.body || {};
+    const item = body.item;
+
+    if (!item || typeof item !== "object") {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid payload: expected { rawText?, mealType?, item: { originalPhrase, canonicalName, ... } }",
+      });
+    }
+
+    const originalPhrase = String(item.originalPhrase || "").trim();
+    const canonicalName = String(item.canonicalName || "").trim();
+    const kind = item.kind != null ? String(item.kind).trim() : null;
+
+    if (!originalPhrase || !canonicalName) {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid payload: item.originalPhrase and item.canonicalName are required",
+      });
+    }
+
+    const parsedMeal = {
+      rawText: body.rawText != null ? String(body.rawText) : null,
+      mealType: body.mealType != null ? String(body.mealType) : null,
+      items: [
+        {
+          originalPhrase,
+          canonicalName,
+          kind,
+          // allow per-item override, else fall back to top-level mealType
+          mealType: item.mealType != null ? String(item.mealType) : (body.mealType != null ? String(body.mealType) : null),
+        },
+      ],
+    };
+
+    // Options call is allowed to be broader. Keep a sane cap.
+    const result = await findBestMatchesForMealItems(db, parsedMeal, {
+      mode: "options",
+      maxPerItem: 40,
+    });
+
+    return res.json({
+      ok: true,
+      result,
+    });
+  } catch (err) {
+    console.error("[MealSearch/Options] Error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Meal search options failed",
+      details: err?.message || String(err),
     });
   }
 });
