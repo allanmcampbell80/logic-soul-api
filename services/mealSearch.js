@@ -221,6 +221,18 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
   const foodItems = db.collection("food_items");
   const maxPerItem = options.maxPerItem ?? 5;
 
+  // mode:
+  // - "fast": return best matches quickly; avoid very broad fallbacks and stop early when confident.
+  // - "options": allow broader fallbacks to populate the Edit picker.
+  const mode = options.mode || "fast";
+  const isFast = mode === "fast";
+
+  // Per-query fetch cap. In fast mode keep this smaller to reduce DB work.
+  const perQueryLimit = isFast ? 20 : 40;
+
+  // In fast mode, avoid the very broad single-word fallbacks.
+  const includeBroadFallbacks = !isFast;
+
   const results = [];
 
   for (const item of parsedMeal.items) {
@@ -600,43 +612,52 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
       });
     }
 
-    // 3) Single-word fallback (VERY broad; limit hard)
-    if (isVeryShortSingleToken || requireSimpleIngredient) {
-      // Strict pass first
-      queries.push({
-        filter: {
-          $and: [
-            { is_simple_ingredient: true },
-            { $or: buildSingleWordOr(singleWordRegexes) }
-          ]
-        },
-        label: "single-word-ingredient"
-      });
+    // 3) Single-word fallback (VERY broad; options-mode only)
+    // For "fast" mode we skip this entirely to keep the response snappy.
+    if (includeBroadFallbacks) {
+      if (isVeryShortSingleToken || requireSimpleIngredient) {
+        // Strict pass first
+        queries.push({
+          filter: {
+            $and: [
+              { is_simple_ingredient: true },
+              { $or: buildSingleWordOr(singleWordRegexes) }
+            ]
+          },
+          label: "single-word-ingredient"
+        });
 
-      // If strict finds nothing, allow drifting to anything (still broad)
-      queries.push({
-        filter: {
-          $or: buildSingleWordOr(singleWordRegexes)
-        },
-        label: "single-word"
-      });
-    } else {
-      queries.push({
-        filter: {
-          $or: buildSingleWordOr(singleWordRegexes)
-        },
-        label: "single-word"
-      });
+        // If strict finds nothing, allow drifting to anything (still broad)
+        queries.push({
+          filter: {
+            $or: buildSingleWordOr(singleWordRegexes)
+          },
+          label: "single-word"
+        });
+      } else {
+        queries.push({
+          filter: {
+            $or: buildSingleWordOr(singleWordRegexes)
+          },
+          label: "single-word"
+        });
+      }
     }
 
     // Dedupe across query stages; keep the best-scoring entry per document.
     const candidatesById = new Map();
 
+    let foundHighSignal = false;
+
     for (const q of queries) {
-      const cursor = foodItems.find(q.filter).limit(40); // keep it reasonable
+      const cursor = foodItems.find(q.filter).limit(perQueryLimit);
       const batch = await cursor.toArray();
       for (const doc of batch) {
         const score = scoreCandidate(finalWords, doc) + labelBoost(q.label);
+        if (!foundHighSignal && labelBoost(q.label) >= 2.0) {
+          // "Exact" / phrase stages are high-signal.
+          foundHighSignal = true;
+        }
         if (score <= 0) continue;
 
         const id = String(doc._id);
@@ -646,6 +667,12 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
         if (!existing || score > existing.score || (score === existing.score && labelBoost(q.label) > labelBoost(existing.label))) {
           candidatesById.set(id, { label: q.label, score, doc });
         }
+      }
+
+      // Fast mode: if we've already collected enough candidates and we hit at least one
+      // high-signal stage, stop running additional (more expensive) queries.
+      if (isFast && foundHighSignal && candidatesById.size >= maxPerItem) {
+        break;
       }
     }
 
@@ -663,7 +690,7 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
       originalPhrase: item.originalPhrase,
       canonicalName: canonical,
       kind: item.kind,
-      mealType: parsedMeal.mealType,
+      mealType: item.mealType || parsedMeal.mealType,
       candidates: top.map((c) => ({
         // Always return a plain string ID (not a BSON ObjectId / {$oid: ...} wrapper)
         id: String(c.doc._id),
