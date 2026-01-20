@@ -280,6 +280,13 @@ async function prefetchFavoriteCandidates({
     const candidateId = String(doc._id);
     const candidateHaystack = buildCandidateHaystack(doc);
 
+    // Only prefetch favorites that actually match the current item tokens.
+    // Prevents unrelated favorites (e.g., protein bars) from showing up for "coffee".
+    const hasTokenMatch = (finalWords || []).some(
+      (w) => w && candidateHaystack.includes(String(w).toLowerCase())
+    );
+    if (!hasTokenMatch) continue;
+
     // If the user specified brand/chain tokens, only consider favorites that match them.
     // This prevents favorites from overriding explicit chains like "mcdonalds".
     if (brandTokens && brandTokens.length) {
