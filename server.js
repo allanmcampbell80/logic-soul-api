@@ -4,7 +4,7 @@ import cors from "cors";
 import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import { findBestMatchesForMealItems } from "./services/mealSearch.js";
 import { buildUserEnrichedDoc, ensureSimpleIngredientsFromParsedList} from "./services/enrich.js";
-import { ensureUser, updateUserProfile, patchUserDailyTotals, storeUserEnergySamples, upsertUserEnergySnapshotForDate, addRecoveryEmail, verifyRecoveryEmail, recoverAccount} from "./services/users.js";
+import { ensureUser, updateUserProfile, patchUserDailyTotals, storeUserEnergySamples, upsertUserEnergySnapshotForDate, addRecoveryEmail, verifyRecoveryEmail, recoverAccount, findUserIdByDeviceId } from "./services/users.js";
 import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, deleteUserMeal,} from "./services/userMeals.js";
 import { getFoodDetails } from "./services/foodDetails.js";
 import { getUserFavoritesByUserId, addUserFavoriteByUserId, deleteUserFavoriteByUserId,} from "./services/favorites.js";
@@ -122,6 +122,54 @@ function scoreCanadianDoc(doc) {
   }
 
   return score;
+}
+
+// Helper: Load favorites for the current request (by X-Device-Id header)
+// Returns: { favoriteFoodIds: string[], favoriteDocs: any[], favoriteMeta: { [id: string]: number } }
+async function getFavoritesForRequest(db, req) {
+  try {
+    if (!db) return { favoriteFoodIds: [], favoriteDocs: [], favoriteMeta: {} };
+
+    const deviceId = String(
+      req?.headers?.["x-device-id"] || req?.headers?.["X-Device-Id"] || ""
+    ).trim();
+
+    if (!deviceId) return { favoriteFoodIds: [], favoriteDocs: [], favoriteMeta: {} };
+
+    const userId = await findUserIdByDeviceId(db, deviceId);
+    if (!userId) return { favoriteFoodIds: [], favoriteDocs: [], favoriteMeta: {} };
+
+    // Fetch favorites directly from users collection instead of getUserFavoritesByUserId
+    const usersCol = db.collection("users");
+    const userDoc = await usersCol.findOne(
+      { _id: new ObjectId(userId) },
+      { projection: { favorites: 1 } }
+    );
+
+    const favorites = Array.isArray(userDoc?.favorites) ? userDoc.favorites : [];
+
+    const favoriteFoodIds = favorites
+      .map((f) => f.foodIdString || (f?.foodId ? String(f.foodId) : null))
+      .filter(Boolean);
+
+    // Build a simple id -> addedAt(ms) map for recency tie-breaking
+    const favoriteMeta = {};
+    for (const f of favorites) {
+      const id = f?.foodIdString || (f?.foodId ? String(f.foodId) : null);
+      if (!id) continue;
+      const ts = f?.addedAt ? new Date(f.addedAt).getTime() : null;
+      if (ts) favoriteMeta[id] = ts;
+    }
+
+    return {
+      favoriteFoodIds,
+      favoriteDocs: favorites,
+      favoriteMeta,
+    };
+  } catch (err) {
+    console.error("[MealSearch] Failed to load favorites for request:", err);
+    return { favoriteFoodIds: [], favoriteDocs: [], favoriteMeta: {} };
+  }
 }
 
 //----------------------------------------------------------------------------------------------------------
@@ -1638,10 +1686,15 @@ app.post("/api/meal-search", async (req, res) => {
       });
     }
 
-  const result = await findBestMatchesForMealItems(db, parsedMeal, {
-    mode: "fast",
-    maxPerItem: 5,
-  });
+    const { favoriteFoodIds, favoriteMeta, favoriteDocs } = await getFavoritesForRequest(db, req);
+
+    const result = await findBestMatchesForMealItems(db, parsedMeal, {
+      mode: "fast",
+      maxPerItem: 5,
+      favoriteFoodIds,
+      favoriteMeta,
+      favoriteDocs,
+    });
 
     return res.json({
       ok: true,
@@ -1704,10 +1757,15 @@ app.post("/api/meal-search/options", async (req, res) => {
       ],
     };
 
+    const { favoriteFoodIds, favoriteMeta, favoriteDocs } = await getFavoritesForRequest(db, req);
+
     // Options call is allowed to be broader. Keep a sane cap.
     const result = await findBestMatchesForMealItems(db, parsedMeal, {
       mode: "options",
       maxPerItem: 40,
+      favoriteFoodIds,
+      favoriteMeta,
+      favoriteDocs,
     });
 
     return res.json({
