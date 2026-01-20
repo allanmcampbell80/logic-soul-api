@@ -1,5 +1,7 @@
 // mealSearch.js
 
+import { ObjectId } from "mongodb";
+
 /**
  * Scoring heuristic:
  * - Count word hits across a broad "haystack" that includes enriched naming fields.
@@ -153,9 +155,171 @@ function tokenizeMealPhrase(phrase) {
   return kept;
 }
 
+// --- FAVORITES + BRAND BOOSTING ---
+
+function buildCandidateHaystack(candidate) {
+  return [
+    candidate.normalized_name,
+    candidate.name,
+    candidate.common_name,
+    candidate.normalized_common_name,
+    candidate.display_product_name,
+    // enriched v2
+    candidate.names_enrichment_v2 && candidate.names_enrichment_v2.brand_name,
+    candidate.names_enrichment_v2 && candidate.names_enrichment_v2.product_name,
+    candidate.names_enrichment_v2 && candidate.names_enrichment_v2.common_name,
+    // arrays
+    Array.isArray(candidate.alt_names) ? candidate.alt_names.join(" ") : "",
+    Array.isArray(candidate.normalized_alt_names) ? candidate.normalized_alt_names.join(" ") : "",
+    candidate.names_enrichment_v2 && Array.isArray(candidate.names_enrichment_v2.alt_names)
+      ? candidate.names_enrichment_v2.alt_names.join(" ")
+      : "",
+    // brand
+    (candidate.brand && candidate.brand.name) || "",
+    (candidate.brand && candidate.brand.owner) || "",
+    // restaurant / prep context
+    candidate.preparation_context,
+    candidate.is_restaurant_item ? "restaurant" : "",
+    candidate.restaurant_chain || "",
+    // ingredients
+    candidate.ingredients_text || ""
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function brandTokensFromParsedItem(item) {
+  // If canonicalName is "coffee" but originalPhrase is "mcdonalds coffee",
+  // treat the extra token(s) as brand/context tokens.
+  const canonical = String(item.canonicalName || item.originalPhrase || "");
+  const original = String(item.originalPhrase || item.canonicalName || "");
+
+  const canonTokens = new Set(tokenizeMealPhrase(canonical));
+  const origTokens = tokenizeMealPhrase(original);
+
+  // Tokens present in originalPhrase but not in canonicalName are treated as brand/context.
+  const extra = origTokens.filter((t) => t && !canonTokens.has(t));
+
+  // Also include restaurant_chain hint if provided by parser.
+  const chain = String(item.restaurant_chain || item.restaurantChain || "");
+  const chainTokens = chain ? tokenizeMealPhrase(chain) : [];
+
+  // Dedupe.
+  return Array.from(new Set([...extra, ...chainTokens]));
+}
+
+function favoriteScoreAdjustment({
+  candidateId,
+  candidateHaystack,
+  favoriteIdSet,
+  brandTokens,
+  isOptionsMode
+}) {
+  if (!favoriteIdSet || favoriteIdSet.size === 0) return 0;
+  if (!favoriteIdSet.has(candidateId)) return 0;
+
+  // Base boost: strong enough to win typical ties, but still allows exact/phrase stages to matter.
+  const baseBoost = isOptionsMode ? 3.0 : 4.5;
+
+  // Guardrail: if the user explicitly provided brand/chain tokens, only boost when the
+  // candidate matches those tokens. Otherwise do not boost (and lightly penalize) so
+  // favorites don't override explicit chains like "mcdonalds".
+  if (brandTokens && brandTokens.length) {
+    let matched = 0;
+    for (const t of brandTokens) {
+      if (!t) continue;
+      if (candidateHaystack.includes(t)) matched += 1;
+    }
+
+    if (matched === 0) return -1.0; // small push down
+    // Partial match gets a smaller boost; full-ish match gets full boost.
+    const ratio = matched / brandTokens.length;
+    return baseBoost * Math.min(1, Math.max(0.35, ratio));
+  }
+
+  return baseBoost;
+}
+
+function buildFavoriteMetaFromDocs(favoriteDocs) {
+  const meta = {};
+  for (const f of favoriteDocs || []) {
+    const id = f && f.foodId ? String(f.foodId) : null;
+    if (!id) continue;
+    const ts = f.addedAt ? new Date(f.addedAt).getTime() : null;
+    if (ts) meta[id] = ts;
+  }
+  return meta;
+}
+
+async function prefetchFavoriteCandidates({
+  foodItems,
+  favoriteFoodIds,
+  favoriteIdSet,
+  favoriteMeta,
+  finalWords,
+  brandTokens,
+  isFast,
+  candidatesById
+}) {
+  if (!favoriteFoodIds || favoriteFoodIds.length === 0) return;
+
+  const favObjectIds = favoriteFoodIds
+    .map((id) => String(id))
+    .filter((id) => ObjectId.isValid(id))
+    .map((id) => new ObjectId(id));
+
+  if (favObjectIds.length === 0) return;
+
+  const favDocs = await foodItems
+    .find({ _id: { $in: favObjectIds } })
+    .limit(favObjectIds.length)
+    .toArray();
+
+  for (const doc of favDocs) {
+    const candidateId = String(doc._id);
+    const candidateHaystack = buildCandidateHaystack(doc);
+
+    // If the user specified brand/chain tokens, only consider favorites that match them.
+    // This prevents favorites from overriding explicit chains like "mcdonalds".
+    if (brandTokens && brandTokens.length) {
+      let matched = 0;
+      for (const t of brandTokens) {
+        if (!t) continue;
+        if (candidateHaystack.includes(t)) matched += 1;
+      }
+      if (matched === 0) continue;
+    }
+
+    // Score favorites using the same scoring function, and include the standard favorites adjustment.
+    const score =
+      scoreCandidate(finalWords, doc) +
+      labelBoost("favorite-prefetch") +
+      favoriteScoreAdjustment({
+        candidateId,
+        candidateHaystack,
+        favoriteIdSet,
+        brandTokens,
+        isOptionsMode: !isFast
+      });
+
+    if (score <= 0) continue;
+
+    const existing = candidatesById.get(candidateId);
+    if (!existing || score > existing.score) {
+      candidatesById.set(candidateId, {
+        label: "favorite-prefetch",
+        score,
+        doc,
+        candidateId
+      });
+    }
+  }
+}
 function labelBoost(label) {
   // Earlier stages should win ties.
   switch (label) {
+    case "favorite-prefetch": return 3.35;
     case "common-name-exact": return 3.0;
     case "common-name-phrase": return 2.0;
     case "alt-name-exact": return 1.5;
@@ -221,6 +385,11 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
   const foodItems = db.collection("food_items");
   const maxPerItem = options.maxPerItem ?? 5;
 
+  const favoriteFoodIds = Array.isArray(options.favoriteFoodIds) ? options.favoriteFoodIds : [];
+  const favoriteIdSet = new Set(favoriteFoodIds.map((x) => String(x)));
+  const favoriteMeta = options.favoriteMeta || buildFavoriteMetaFromDocs(options.favoriteDocs || []);
+  // favoriteMeta shape: { [foodIdString]: addedAtTimestamp }
+
   // mode:
   // - "fast": return best matches quickly; avoid very broad fallbacks and stop early when confident.
   // - "options": allow broader fallbacks to populate the Edit picker.
@@ -247,6 +416,8 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
     // If tokenization removed everything, fall back to basic split
     const fallbackWords = normalizeText(canonical).split(/\s+/).filter(Boolean);
     const finalWords = words.length ? words : fallbackWords;
+
+    const brandTokens = brandTokensFromParsedItem(item);
 
     const canonicalNorm = normalizeText(canonical);
     const exactNormRegex = new RegExp(`^${canonicalNorm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
@@ -647,25 +818,103 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
     // Dedupe across query stages; keep the best-scoring entry per document.
     const candidatesById = new Map();
 
+    // Prefetch favorites first so they don't get lost in broad searches.
+    await prefetchFavoriteCandidates({
+      foodItems,
+      favoriteFoodIds,
+      favoriteIdSet,
+      favoriteMeta,
+      finalWords,
+      brandTokens,
+      isFast,
+      candidatesById
+    });
+
+    // If favorites already give us enough strong candidates in fast mode, we can stop early.
     let foundHighSignal = false;
+    for (const existing of candidatesById.values()) {
+      if (labelBoost(existing.label) >= 2.0) {
+        foundHighSignal = true;
+        break;
+      }
+    }
+
+    if (isFast && foundHighSignal && candidatesById.size >= maxPerItem) {
+      // Skip broad DB queries; favorites were sufficient.
+      const candidates = Array.from(candidatesById.values());
+
+      candidates.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+
+        const lb = labelBoost(b.label) - labelBoost(a.label);
+        if (lb !== 0) return lb;
+
+        // Final tie-breaker: most recently favorited wins
+        const aFav = favoriteMeta[a.candidateId];
+        const bFav = favoriteMeta[b.candidateId];
+
+        if (aFav && bFav) return bFav - aFav;
+        if (aFav) return -1;
+        if (bFav) return 1;
+
+        return 0;
+      });
+
+      const top = candidates.slice(0, maxPerItem);
+
+      results.push({
+        originalPhrase: item.originalPhrase,
+        canonicalName: canonical,
+        kind: item.kind,
+        mealType: item.mealType || parsedMeal.mealType,
+        candidates: top.map((c) => ({
+          id: String(c.doc._id),
+          name: c.doc.name,
+          normalized_name: c.doc.normalized_name,
+          common_name: c.doc.common_name || null,
+          normalized_common_name: c.doc.normalized_common_name || null,
+          display_product_name: c.doc.display_product_name || null,
+          preparation_context: c.doc.preparation_context || (c.doc.names_enrichment_v2 && c.doc.names_enrichment_v2.preparation_context) || null,
+          is_restaurant_item: Boolean(c.doc.is_restaurant_item || (c.doc.names_enrichment_v2 && c.doc.names_enrichment_v2.is_restaurant_item)),
+          restaurant_chain: c.doc.restaurant_chain || null,
+          brand: c.doc.brand || null,
+          food_type: c.doc.food_type || null,
+          label: c.label,
+          score: c.score
+        }))
+      });
+
+      continue;
+    }
 
     for (const q of queries) {
       const cursor = foodItems.find(q.filter).limit(perQueryLimit);
       const batch = await cursor.toArray();
       for (const doc of batch) {
-        const score = scoreCandidate(finalWords, doc) + labelBoost(q.label);
+        const candidateId = String(doc._id);
+        const candidateHaystack = buildCandidateHaystack(doc);
+
+        const score =
+          scoreCandidate(finalWords, doc) +
+          labelBoost(q.label) +
+          favoriteScoreAdjustment({
+            candidateId,
+            candidateHaystack,
+            favoriteIdSet,
+            brandTokens,
+            isOptionsMode: !isFast
+          });
         if (!foundHighSignal && labelBoost(q.label) >= 2.0) {
           // "Exact" / phrase stages are high-signal.
           foundHighSignal = true;
         }
         if (score <= 0) continue;
 
-        const id = String(doc._id);
-        const existing = candidatesById.get(id);
+        const existing = candidatesById.get(candidateId);
 
         // Keep the highest score; if tied, prefer the earlier-stage label via labelBoost.
         if (!existing || score > existing.score || (score === existing.score && labelBoost(q.label) > labelBoost(existing.label))) {
-          candidatesById.set(id, { label: q.label, score, doc });
+          candidatesById.set(candidateId, { label: q.label, score, doc, candidateId });
         }
       }
 
@@ -678,10 +927,22 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
 
     const candidates = Array.from(candidatesById.values());
 
-    // Sort by score desc; if tied, prefer earlier-stage labels.
+    // Sort by score desc; if tied, prefer earlier-stage labels. Final tie-breaker: most recently favorited wins.
     candidates.sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
-      return labelBoost(b.label) - labelBoost(a.label);
+
+      const lb = labelBoost(b.label) - labelBoost(a.label);
+      if (lb !== 0) return lb;
+
+      // Final tie-breaker: most recently favorited wins
+      const aFav = favoriteMeta[a.candidateId];
+      const bFav = favoriteMeta[b.candidateId];
+
+      if (aFav && bFav) return bFav - aFav;
+      if (aFav) return -1;
+      if (bFav) return 1;
+
+      return 0;
     });
 
     const top = candidates.slice(0, maxPerItem);
