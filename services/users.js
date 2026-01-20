@@ -92,6 +92,35 @@ export async function ensureUser(db, payload) {
   return mapUserDoc(doc);
 }
 
+// Lookup-only helpers (no upsert). Useful for request-scoped resolution.
+export async function findUserIdByDeviceId(db, deviceId) {
+  if (!db) throw new Error("DB not ready");
+
+  const cleanDeviceId = String(deviceId || "").trim();
+  if (!cleanDeviceId) return null;
+
+  const usersCollection = db.collection("users");
+  const user = await usersCollection.findOne(
+    { deviceId: cleanDeviceId },
+    { projection: { _id: 1 } }
+  );
+
+  return user?._id ? String(user._id) : null;
+}
+
+export async function findUserByDeviceId(db, deviceId, projection = null) {
+  if (!db) throw new Error("DB not ready");
+
+  const cleanDeviceId = String(deviceId || "").trim();
+  if (!cleanDeviceId) return null;
+
+  const usersCollection = db.collection("users");
+  return await usersCollection.findOne(
+    { deviceId: cleanDeviceId },
+    projection ? { projection } : undefined
+  );
+}
+
 export async function updateUserProfile(db, userId, profile) {
   if (!db) throw new Error("DB not ready");
 
@@ -401,11 +430,17 @@ export async function upsertUserEnergySnapshotForDate(db, userId, dateKey, optio
 
   cleaned.sort((a, b) => a.ts - b.ts);
 
-  const sum = cleaned.reduce((acc, s) => acc + s.level, 0);
-  const avg = Math.round((sum / cleaned.length) * 100) / 100;
-  const min = cleaned.reduce((acc, s) => Math.min(acc, s.level), cleaned[0].level);
-  const max = cleaned.reduce((acc, s) => Math.max(acc, s.level), cleaned[0].level);
-  const latest = cleaned[cleaned.length - 1];
+  // Cap stored samples to avoid unbounded growth (keep most recent N)
+  const MAX_SAMPLES = 500;
+  const cleanedCapped = cleaned.length > MAX_SAMPLES
+    ? cleaned.slice(cleaned.length - MAX_SAMPLES)
+    : cleaned;
+
+  const sum = cleanedCapped.reduce((acc, s) => acc + s.level, 0);
+  const avg = Math.round((sum / cleanedCapped.length) * 100) / 100;
+  const min = cleanedCapped.reduce((acc, s) => Math.min(acc, s.level), cleanedCapped[0].level);
+  const max = cleanedCapped.reduce((acc, s) => Math.max(acc, s.level), cleanedCapped[0].level);
+  const latest = cleanedCapped[cleanedCapped.length - 1];
 
   const now = new Date();
 
@@ -423,8 +458,11 @@ export async function upsertUserEnergySnapshotForDate(db, userId, dateKey, optio
     "checkin.energy_max": max,
     "checkin.energy_latest": latest.level,
     "checkin.energy_latest_ts": latest.ts,
-    "checkin.energy_sample_count": cleaned.length,
+    "checkin.energy_sample_count": cleanedCapped.length,
     "checkin.energy_updated_at": now,
+
+    // Store normalized/capped samples array
+    "checkin.energy_samples": cleanedCapped,
 
     // Totals snapshot
     "totals.checkin_energy": avg,
@@ -457,7 +495,7 @@ export async function upsertUserEnergySnapshotForDate(db, userId, dateKey, optio
     avg,
     min,
     max,
-    count: cleaned.length,
+    count: cleanedCapped.length,
   };
 }
 //--------------------------------------------------------------------------------------------------------
