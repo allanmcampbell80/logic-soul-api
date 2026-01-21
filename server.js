@@ -124,6 +124,33 @@ function scoreCanadianDoc(doc) {
   return score;
 }
 
+function normalizeNutrientsForClient(nutrients) {
+  if (!Array.isArray(nutrients) || nutrients.length === 0) return nutrients;
+
+  return nutrients.map((n) => {
+    if (!n || typeof n !== "object") return n;
+
+    const per_serving = n.per_serving ?? n.perServing ?? null;
+    const per_100g = n.per_100g ?? n.per100g ?? null;
+    const display_name = n.display_name ?? n.displayName ?? null;
+    const data_quality = n.data_quality ?? n.dataQuality ?? null;
+
+    // Preserve original keys, but add camelCase aliases so older iOS decoders
+    // (that don't use convertFromSnakeCase) can still parse user-enriched docs.
+    return {
+      ...n,
+      per_serving,
+      perServing: per_serving,
+      per_100g,
+      per100g: per_100g,
+      display_name,
+      displayName: display_name,
+      data_quality,
+      dataQuality: data_quality,
+    };
+  });
+}
+
 // Helper: Load favorites for the current request (by X-Device-Id header)
 // Returns: { favoriteFoodIds: string[], favoriteDocs: any[], favoriteMeta: { [id: string]: number } }
 async function getFavoritesForRequest(db, req) {
@@ -1508,6 +1535,9 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
     });
 
     if (doc) {
+      if (Array.isArray(doc.nutrients)) {
+        doc.nutrients = normalizeNutrientsForClient(doc.nutrients);
+      }
       console.log("[API] Lookup result: DIRECT USDA branded match for barcode", normalized);
       return res.json(doc);
     }
@@ -1519,6 +1549,9 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
     doc = await chooseBestCanadianDocForUPC(normalized);
 
     if (doc) {
+      if (Array.isArray(doc.nutrients)) {
+        doc.nutrients = normalizeNutrientsForClient(doc.nutrients);
+      }
       const userSubmitted = !!doc?.source?.user_submitted;
       const sourceType = doc?.source?.type || "";
       const tag = userSubmitted
@@ -1552,6 +1585,9 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
     // IMPORTANT: we no longer promote `usda_equivalent` here.
     // Canadian/OFF or user-submitted records remain the primary document,
     // and USDA equivalents are used only as supplemental data elsewhere.
+    if (doc && Array.isArray(doc.nutrients)) {
+      doc.nutrients = normalizeNutrientsForClient(doc.nutrients);
+    }
     return res.json(doc);
   } catch (err) {
     console.error("Error fetching by barcode:", err);
@@ -1719,7 +1755,13 @@ app.get("/foods/details", async (req, res) => {
     const byId = new Map(docs.map((d) => [String(d._id), d]));
     const ordered = ids
       .map((id) => byId.get(String(id)))
-      .filter(Boolean);
+      .filter(Boolean)
+      .map((d) => {
+        if (d && Array.isArray(d.nutrients)) {
+          return { ...d, nutrients: normalizeNutrientsForClient(d.nutrients) };
+        }
+        return d;
+      });
 
     return res.json({
       ok: true,
