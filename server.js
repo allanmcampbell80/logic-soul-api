@@ -1648,12 +1648,83 @@ app.get("/foods/details", async (req, res) => {
 
     console.log("[FoodDetails] Incoming ids:", ids);
 
-    const items = await getFoodDetails(db, ids);
+    // Fetch full food documents directly. This avoids accidental projection/mapping
+    // issues (e.g., dropping `nutrients`) in the service layer.
+    const foodsCol = db.collection(collectionName);
+
+    const objectIds = ids
+      .map((s) => String(s || "").trim())
+      .filter((s) => ObjectId.isValid(s))
+      .map((s) => new ObjectId(s));
+
+    if (!objectIds.length) {
+      return res.status(400).json({
+        ok: false,
+        error: "No valid Mongo ObjectIds provided in 'ids'.",
+      });
+    }
+
+    // Pull the docs with a generous projection (include `nutrients`, ingredients, serving, etc.)
+    const docs = await foodsCol
+      .find(
+        {
+          ...notIgnoredQuery(),
+          _id: { $in: objectIds },
+        },
+        {
+          projection: {
+            // identity
+            _id: 1,
+            type: 1,
+            name: 1,
+            display_product_name: 1,
+            common_name: 1,
+            normalized_name: 1,
+            brand: 1,
+            category: 1,
+            food_type: 1,
+            preparation_context: 1,
+
+            // barcode fields
+            barcode: 1,
+            normalized_upc: 1,
+            normalized_upc_16: 1,
+            original_barcode_raw: 1,
+            is_canadian_product: 1,
+            source_dataset: 1,
+
+            // nutrition
+            nutrients: 1,
+            serving_info: 1,
+            default_portion: 1,
+            off_nutriments: 1,
+
+            // ingredients
+            ingredients_text: 1,
+            ingredients_parsed: 1,
+
+            // provenance
+            source: 1,
+            usda_equivalent: 1,
+
+            // timestamps
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        }
+      )
+      .toArray();
+
+    // Preserve request order
+    const byId = new Map(docs.map((d) => [String(d._id), d]));
+    const ordered = ids
+      .map((id) => byId.get(String(id)))
+      .filter(Boolean);
 
     return res.json({
       ok: true,
-      count: Array.isArray(items) ? items.length : 0,
-      items: items || [],
+      count: ordered.length,
+      items: ordered,
     });
   } catch (err) {
     console.error("[FoodDetails] Error:", err);
