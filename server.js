@@ -163,9 +163,11 @@ async function attachUSDAEquivalentFoodIdToDoc(db, doc) {
     // Already have a stored Mongo id → nothing to do.
     const existingFoodId = eq.food_id || eq.foodId || doc.usda_equivalent_food_id || doc.usdaEquivalentFoodId;
     if (existingFoodId && ObjectId.isValid(String(existingFoodId))) {
+      const fid = String(existingFoodId);
       // Normalize the outward-facing convenience alias fields.
-      doc.usda_equivalent_food_id = String(existingFoodId);
-      doc.usda_equivalent = { ...eq, food_id: String(existingFoodId) };
+      doc.usda_equivalent_food_id = fid;
+      doc.usdaEquivalentFoodId = fid;
+      doc.usda_equivalent = { ...eq, food_id: fid, foodId: fid };
       return doc;
     }
 
@@ -190,7 +192,8 @@ async function attachUSDAEquivalentFoodIdToDoc(db, doc) {
 
     // Attach to response
     doc.usda_equivalent_food_id = foodIdStr;
-    doc.usda_equivalent = { ...eq, food_id: foodIdStr };
+    doc.usdaEquivalentFoodId = foodIdStr;
+    doc.usda_equivalent = { ...eq, food_id: foodIdStr, foodId: foodIdStr };
 
     // Best-effort: persist the discovered food_id back onto the Canadian doc so future calls avoid lookup.
     // Only do this when the current doc is a Mongo doc (has _id) and looks valid.
@@ -230,9 +233,11 @@ async function attachUSDAEquivalentFoodIdToCandidates(db, result) {
         if (hasId) {
           // normalize outward alias
           const fid = c.usda_equivalent.food_id || c.usda_equivalent.foodId || c.usda_equivalent_food_id || c.usdaEquivalentFoodId;
-          c.usda_equivalent_food_id = ObjectId.isValid(String(fid)) ? String(fid) : c.usda_equivalent_food_id;
           if (ObjectId.isValid(String(fid))) {
-            c.usda_equivalent = { ...c.usda_equivalent, food_id: String(fid) };
+            const fidStr = String(fid);
+            c.usda_equivalent_food_id = fidStr;
+            c.usdaEquivalentFoodId = fidStr;
+            c.usda_equivalent = { ...c.usda_equivalent, food_id: fidStr, foodId: fidStr };
           }
           continue;
         }
@@ -316,8 +321,10 @@ async function enrichMealSearchResultWithUSDAEquivalent(db, result) {
         // If the linked usda_equivalent already stores a Mongo food_id, surface it for the client.
         const storedEqFoodId = doc?.usda_equivalent?.food_id;
         if (storedEqFoodId && ObjectId.isValid(String(storedEqFoodId))) {
-          c.usda_equivalent_food_id = String(storedEqFoodId);
-          c.usda_equivalent = { ...c.usda_equivalent, food_id: String(storedEqFoodId) };
+          const fidStr = String(storedEqFoodId);
+          c.usda_equivalent_food_id = fidStr;
+          c.usdaEquivalentFoodId = fidStr;
+          c.usda_equivalent = { ...c.usda_equivalent, food_id: fidStr, foodId: fidStr };
         }
       }
     }
