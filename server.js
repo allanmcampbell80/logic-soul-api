@@ -1903,36 +1903,22 @@ app.get("/food-items/:id", async (req, res) => {
 //--------------------------------------------------------------------------------------------------
 
 // GET /foods/details?ids=... → fetch nutrient/details for one or more food IDs
-// Usage examples:
-//   /foods/details?ids=69249d5d5f482c9b7d71626e
-//   /foods/details?ids=69249d5d5f482c9b7d71626e,6924a05a5f482c9b7d71923f
-//   /foods/details?ids=id1&ids=id2&ids=id3
 app.get("/foods/details", async (req, res) => {
   try {
     if (!db) {
-      return res.status(500).json({
-        ok: false,
-        error: "DB not ready",
-      });
+      return res.status(500).json({ ok: false, error: "DB not ready" });
     }
 
     let { ids } = req.query;
 
     if (!ids) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing required query parameter 'ids'.",
-      });
+      return res.status(400).json({ ok: false, error: "Missing required query parameter 'ids'." });
     }
 
     // Allow either a single comma-separated string or repeated ?ids=...&ids=...
     if (Array.isArray(ids)) {
       ids = ids
-        .flatMap((v) =>
-          String(v)
-            .split(",")
-            .map((s) => s.trim())
-        )
+        .flatMap((v) => String(v).split(",").map((s) => s.trim()))
         .filter(Boolean);
     } else {
       ids = String(ids)
@@ -1944,103 +1930,22 @@ app.get("/foods/details", async (req, res) => {
     if (!ids.length) {
       return res.status(400).json({
         ok: false,
-        error:
-          "No valid IDs provided. Pass one or more MongoDB IDs via ?ids=id1,id2,…",
+        error: "No valid IDs provided. Pass one or more MongoDB IDs via ?ids=id1,id2,…",
       });
     }
 
     console.log("[FoodDetails] Incoming ids:", ids);
 
-    // Fetch full food documents directly. This avoids accidental projection/mapping
-    // issues (e.g., dropping `nutrients`) in the service layer.
-    const foodsCol = db.collection(collectionName);
+    // Service layer owns projections/mapping/ordering (including OFF nutrient fallbacks)
+    const result = await getFoodDetails(db, ids);
 
-    const objectIds = ids
-      .map((s) => String(s || "").trim())
-      .filter((s) => ObjectId.isValid(s))
-      .map((s) => new ObjectId(s));
-
-    if (!objectIds.length) {
-      return res.status(400).json({
-        ok: false,
-        error: "No valid Mongo ObjectIds provided in 'ids'.",
-      });
-    }
-
-    // Pull the docs with a generous projection (include `nutrients`, ingredients, serving, etc.)
-    const docs = await foodsCol
-      .find(
-        {
-          ...notIgnoredQuery(),
-          _id: { $in: objectIds },
-        },
-        {
-          projection: {
-            // identity
-            _id: 1,
-            type: 1,
-            name: 1,
-            display_product_name: 1,
-            common_name: 1,
-            normalized_name: 1,
-            brand: 1,
-            category: 1,
-            food_type: 1,
-            preparation_context: 1,
-
-            // barcode fields
-            barcode: 1,
-            normalized_upc: 1,
-            normalized_upc_16: 1,
-            original_barcode_raw: 1,
-            is_canadian_product: 1,
-            source_dataset: 1,
-
-            // nutrition
-            nutrients: 1,
-            serving_info: 1,
-            default_portion: 1,
-            off_nutriments: 1,
-
-            // ingredients
-            ingredients_text: 1,
-            ingredients_parsed: 1,
-
-            // provenance
-            source: 1,
-            usda_equivalent: 1,
-
-            // timestamps
-            createdAt: 1,
-            updatedAt: 1,
-          },
-        }
-      )
-      .toArray();
-
-    // Preserve request order
-    const byId = new Map(docs.map((d) => [String(d._id), d]));
-    const ordered = ids
-      .map((id) => byId.get(String(id)))
-      .filter(Boolean)
-      .map((d) => {
-        let out = d;
-        if (out && Array.isArray(out.nutrients)) {
-          out = { ...out, nutrients: normalizeNutrientsForClient(out.nutrients) };
-        }
-        return out;
-      });
-
-    // Attach submit-ready USDA Mongo ids for any linked equivalents (best-effort).
-    const orderedWithUSDAIds = [];
-    for (const d of ordered) {
-      orderedWithUSDAIds.push(await attachUSDAEquivalentFoodIdToDoc(db, d));
-    }
+    // Support either a raw array return or an object with `items`
+    const items = Array.isArray(result) ? result : Array.isArray(result?.items) ? result.items : [];
 
     return res.json({
       ok: true,
-      count: orderedWithUSDAIds.length,
-      items: orderedWithUSDAIds,
+      count: items.length,
+      items,
     });
   } catch (err) {
     console.error("[FoodDetails] Error:", err);
