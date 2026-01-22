@@ -76,6 +76,18 @@ function hasNonEmptyArray(v) {
   return Array.isArray(v) && v.length > 0;
 }
 
+function isBarcodeLockedParsedMealItem(it) {
+  if (!it || typeof it !== "object") return false;
+  const bc = String(it.barcode || it.upc || "").trim();
+  const confirmed = !!(it.is_barcode_confirmed || it.isBarcodeConfirmed);
+  return confirmed || bc.length > 0;
+}
+
+function normalizeBarcodeTo16(raw) {
+  const cleaned = String(raw || "").replace(/\D/g, "");
+  return cleaned ? cleaned.padStart(16, "0") : "";
+}
+
 function isLikelyDvBoilerplate(text) {
   const t = safeTrimString(text).toLowerCase();
   if (!t) return false;
@@ -425,6 +437,71 @@ async function chooseBestCanadianDocForUPC(normalizedUPC16) {
   });
 
   return docs[0];
+}
+
+// --- Barcode lookup helpers ---
+async function fetchBestDocForBarcode(normalizedUPC16) {
+  if (!collection || !db) return null;
+
+  const normalized = String(normalizedUPC16 || "").replace(/\D/g, "").padStart(16, "0");
+  if (!normalized) return null;
+
+  // 1) Direct USDA branded match (gold standard for US products)
+  let doc = await collection.findOne({
+    ...notIgnoredQuery(),
+    "source.usda_data_type": "Branded",
+    $or: [{ normalized_upc: normalized }, { normalized_upc_16: normalized }],
+  });
+
+  if (!doc) {
+    // 2) Best Canadian doc
+    doc = await chooseBestCanadianDocForUPC(normalized);
+  }
+
+  if (!doc) {
+    // 3) Generic fallback
+    doc = await collection.findOne({
+      ...notIgnoredQuery(),
+      $or: [{ normalized_upc: normalized }, { normalized_upc_16: normalized }],
+    });
+  }
+
+  if (!doc) return null;
+
+  // Normalize nutrient keys for client compatibility
+  if (Array.isArray(doc.nutrients)) {
+    doc.nutrients = normalizeNutrientsForClient(doc.nutrients);
+  }
+
+  // Attach submit-ready USDA equivalent food_id when possible
+  doc = await attachUSDAEquivalentFoodIdToDoc(db, doc);
+
+  return doc;
+}
+
+function makeBarcodeLockedCandidateFromDoc(doc, barcode16) {
+  if (!doc || typeof doc !== "object") return null;
+  const name = doc.display_product_name || doc.common_name || doc.name || "";
+  const brandName = (doc.brand && (doc.brand.name || doc.brand.owner)) || null;
+
+  return {
+    id: doc._id ? String(doc._id) : null,
+    name,
+    brandName,
+    normalizedUPC16: barcode16 || doc.normalized_upc_16 || doc.normalized_upc || null,
+    // Make it unmistakably dominant
+    score: 1_000_000,
+    _combinedScore: 1_000_000,
+    // Optional flags for clients / debugging
+    is_barcode_confirmed: true,
+    isBarcodeConfirmed: true,
+    barcode: barcode16 || null,
+    source: doc.source || null,
+    is_canadian_product: doc.is_canadian_product ?? null,
+    usda_equivalent: doc.usda_equivalent ?? null,
+    usda_equivalent_food_id: doc.usda_equivalent_food_id ?? doc.usdaEquivalentFoodId ?? null,
+    usdaEquivalentFoodId: doc.usdaEquivalentFoodId ?? doc.usda_equivalent_food_id ?? null,
+  };
 }
 
 
@@ -2007,6 +2084,56 @@ app.post("/api/meal-search", async (req, res) => {
     });
 
     result = await enrichMealSearchResultWithUSDAEquivalent(db, result);
+
+    // --- Barcode override: barcode-confirmed items are authoritative and must not be replaced by favorites.
+    // We forcibly set the top candidate to the barcode lookup result.
+    try {
+      const parsedItems = Array.isArray(parsedMeal?.items) ? parsedMeal.items : [];
+      const outItems = Array.isArray(result?.items) ? result.items : [];
+
+      const overrideJobs = [];
+      for (let i = 0; i < parsedItems.length && i < outItems.length; i++) {
+        const pIt = parsedItems[i];
+        if (!isBarcodeLockedParsedMealItem(pIt)) continue;
+
+        const barcode16 = normalizeBarcodeTo16(pIt.barcode || pIt.upc || "");
+        if (!barcode16) continue;
+
+        overrideJobs.push(
+          (async () => {
+            const doc = await fetchBestDocForBarcode(barcode16);
+            if (!doc) return;
+
+            const cand = makeBarcodeLockedCandidateFromDoc(doc, barcode16);
+            if (!cand) return;
+
+            // Mutate the existing result item in place.
+            const rIt = outItems[i];
+            if (rIt && typeof rIt === "object") {
+              rIt.candidates = [cand];
+              // Common shapes used by clients/services
+              if ("best" in rIt) rIt.best = cand;
+              if ("bestCandidate" in rIt) rIt.bestCandidate = cand;
+              if ("chosen" in rIt) rIt.chosen = cand;
+              if ("chosenId" in rIt) rIt.chosenId = cand.id;
+              if ("foodId" in rIt) rIt.foodId = cand.id;
+              if ("id" in rIt && !rIt.id) rIt.id = cand.id;
+
+              // Optional debug/flags
+              rIt.is_barcode_confirmed = true;
+              rIt.isBarcodeConfirmed = true;
+              rIt.barcode = barcode16;
+            }
+          })()
+        );
+      }
+
+      if (overrideJobs.length > 0) {
+        await Promise.all(overrideJobs);
+      }
+    } catch (barcodeOverrideErr) {
+      console.error("[MealSearch] Barcode override failed (best-effort):", barcodeOverrideErr);
+    }
 
     return res.json({
       ok: true,
