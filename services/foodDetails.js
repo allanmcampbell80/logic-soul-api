@@ -62,6 +62,58 @@ function buildOffNutrientsArray(off) {
     nutrients.push({ key: "sodium", display_name: "Sodium, Na", unit: "mg", per_100g: sodiumMg, source: "off", data_quality: "off", confidence: 0.6 });
   }
 
+  // Saturated fat (g)
+  const satFat = pickFirstNumber(off, ["saturated-fat_100g", "saturated-fat", "saturated-fat_value", "saturated-fat_serving"]);
+  if (satFat !== null) {
+    nutrients.push({ key: "saturated_fat", display_name: "Saturated fat", unit: "g", per_100g: satFat, source: "off", data_quality: "off", confidence: 0.6 });
+  }
+
+  // Salt (g)
+  const salt = pickFirstNumber(off, ["salt_100g", "salt", "salt_value", "salt_serving"]);
+  if (salt !== null) {
+    nutrients.push({ key: "salt", display_name: "Salt", unit: "g", per_100g: salt, source: "off", data_quality: "off", confidence: 0.6 });
+  }
+
+  // Potassium (mg) — OFF often stores potassium in grams. Convert g → mg when value looks like grams.
+  let potassium = pickFirstNumber(off, ["potassium_100g", "potassium", "potassium_value", "potassium_serving"]);
+  if (potassium !== null) {
+    // Heuristic: if <= 10, assume grams → convert to mg.
+    const potassiumMg = potassium <= 10 ? potassium * 1000 : potassium;
+    nutrients.push({ key: "potassium", display_name: "Potassium, K", unit: "mg", per_100g: potassiumMg, source: "off", data_quality: "off", confidence: 0.6 });
+  }
+
+  // Calcium (mg) — OFF often stores calcium in grams. Convert g → mg when value looks like grams.
+  let calcium = pickFirstNumber(off, ["calcium_100g", "calcium", "calcium_value", "calcium_serving"]);
+  if (calcium !== null) {
+    // Heuristic: if <= 10, assume grams → convert to mg.
+    const calciumMg = calcium <= 10 ? calcium * 1000 : calcium;
+    nutrients.push({ key: "calcium", display_name: "Calcium, Ca", unit: "mg", per_100g: calciumMg, source: "off", data_quality: "off", confidence: 0.6 });
+  }
+
+  // Iron (mg) — OFF often stores iron in grams. Convert g → mg when value looks like grams.
+  let iron = pickFirstNumber(off, ["iron_100g", "iron", "iron_value", "iron_serving"]);
+  if (iron !== null) {
+    // Heuristic: iron amounts are usually small; if <= 1, assume grams → convert to mg.
+    const ironMg = iron <= 1 ? iron * 1000 : iron;
+    nutrients.push({ key: "iron", display_name: "Iron, Fe", unit: "mg", per_100g: ironMg, source: "off", data_quality: "off", confidence: 0.6 });
+  }
+
+  // Vitamin C (mg) — OFF often stores vitamin C in grams. Convert g → mg when value looks like grams.
+  let vitC = pickFirstNumber(off, ["vitamin-c_100g", "vitamin-c", "vitamin-c_value", "vitamin-c_serving"]);
+  if (vitC !== null) {
+    // Heuristic: if <= 1, assume grams → convert to mg.
+    const vitCMg = vitC <= 1 ? vitC * 1000 : vitC;
+    nutrients.push({ key: "vitamin_c", display_name: "Vitamin C", unit: "mg", per_100g: vitCMg, source: "off", data_quality: "off", confidence: 0.6 });
+  }
+
+  // Vitamin A (µg) — OFF often stores vitamin A in grams. Convert g → µg when value looks like grams.
+  let vitA = pickFirstNumber(off, ["vitamin-a_100g", "vitamin-a", "vitamin-a_value", "vitamin-a_serving"]);
+  if (vitA !== null) {
+    // Heuristic: if <= 1, assume grams → convert to µg.
+    const vitAUg = vitA <= 1 ? vitA * 1_000_000 : vitA;
+    nutrients.push({ key: "vitamin_a", display_name: "Vitamin A", unit: "µg", per_100g: vitAUg, source: "off", data_quality: "off", confidence: 0.6 });
+  }
+
   return nutrients;
 }
 
@@ -139,6 +191,7 @@ export async function getFoodDetails(db, ids) {
       label: n.display_name || null,
       unit: n.unit || null,
       per100g: typeof n.per_100g === "number" ? n.per_100g : null,
+      perServing: typeof n.per_serving === "number" ? n.per_serving : null,
       // Keep raw fields if you ever want them:
       source: n.source || null,
       dataQuality: n.data_quality || null,
