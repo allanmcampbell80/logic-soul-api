@@ -1342,6 +1342,7 @@ app.get("/users/:id/daily-totals", async (req, res) => {
       dateKey: doc.dateKey,
       timezone: doc.timezone || null,
       totals: doc.totals || {},
+      totals_estimated: doc.totals_estimated || {},
       updatedAt: doc.updatedAt || null,
       createdAt: doc.createdAt || null,
     });
