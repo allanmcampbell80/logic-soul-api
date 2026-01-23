@@ -322,6 +322,22 @@ export async function logUserMeal(userId, payload) {
 
   const result = await userMealsCollection.insertOne(doc);
 
+  // Recompute daily totals immediately so rings update without relying on other code paths.
+  // Use the collection's db handle (avoids needing to thread `db` through every caller).
+  try {
+    const db = userMealsCollection?.db;
+    if (db && dateKey) {
+      await recomputeDailyNutritionTotals(db, userObjectId, dateKey);
+    } else {
+      console.warn("[logUserMeal] skip recompute (missing db/dateKey)", {
+        hasDb: Boolean(db),
+        dateKey,
+      });
+    }
+  } catch (e) {
+    console.error("[logUserMeal] recomputeDailyNutritionTotals failed", e?.message || e);
+  }
+
   // Shape a small response back to the app
   return {
     id: result.insertedId.toString(),
@@ -369,6 +385,20 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
   const DEBUG_RECOMPUTE = String(process.env.DEBUG_RECOMPUTE || "").toLowerCase() === "true";
 
   const toUnitString = (v) => (typeof v === "string" ? v.trim() : "");
+  // Normalize common unit variants so OFF/USDA differences don't silently drop nutrients.
+  const normalizeUnit = (u) => {
+    const s = String(u || "").trim();
+    if (!s) return "";
+    const lower = s.toLowerCase();
+    if (lower === "ug") return "µg";
+    if (lower === "mcg") return "µg";
+    if (lower === "iu") return "iu";
+    if (lower === "kj") return "kj";
+    if (lower === "kcal") return "kcal";
+    if (lower === "mg") return "mg";
+    if (lower === "g") return "g";
+    return s;
+  };
 
   // 1. Load all meals for this user + date
   const meals = await userMealsCollection
@@ -707,8 +737,9 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
 
         // Some datasets reuse the same `key` for different units (e.g., vitamin_a IU vs RAE µg).
         // Only aggregate when the unit matches what we expect for this panel field.
-        const unit = toUnitString(nutrient.unit);
-        if (cfg.unit && unit && String(unit) !== String(cfg.unit)) continue;
+        const unit = normalizeUnit(toUnitString(nutrient.unit));
+        const expectedUnit = normalizeUnit(cfg.unit);
+        if (expectedUnit && unit && String(unit) !== String(expectedUnit)) continue;
 
         const per100g = toNumber(nutrient.per_100g ?? nutrient.per100g);
         const perServing = toNumber(nutrient.per_serving ?? nutrient.perServing);
