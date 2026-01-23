@@ -2218,6 +2218,51 @@ app.post("/foods/usda-candidates", async (req, res) => {
 
     const { name, brandName, limit } = req.body || {};
 
+    // ------------------------------------------------------------------
+    // Server-side gating: only run USDA candidate search when we have a
+    // user-enriched Canadian base product for this barcode.
+    //
+    // Why: We do NOT want to link USDA data to an OFF/import doc. The iOS
+    // app already tries to gate this, but we also enforce it here so we
+    // don't waste cycles or accidentally return candidates too early.
+    //
+    // The client can pass either `barcode` (raw) or `normalizedUPC16`.
+    // If neither is provided, we fall back to the old behavior.
+    // ------------------------------------------------------------------
+    const rawBarcode = typeof req.body?.barcode === "string" ? req.body.barcode : null;
+    const rawNormalizedUPC16 = typeof req.body?.normalizedUPC16 === "string" ? req.body.normalizedUPC16 : null;
+
+    const barcodeDigits = rawBarcode ? String(rawBarcode).replace(/\D/g, "") : "";
+    const normalizedUPC16 = rawNormalizedUPC16
+      ? String(rawNormalizedUPC16).replace(/\D/g, "").padStart(16, "0")
+      : (barcodeDigits ? barcodeDigits.padStart(16, "0") : "");
+
+    if (normalizedUPC16) {
+      // A USDA branded doc can share the same UPC; we specifically require
+      // a Canadian user-enriched base doc (source.user_submitted === true).
+      const baseUserEnriched = await collection.findOne({
+        ...notIgnoredQuery(),
+        normalized_upc_16: normalizedUPC16,
+        "source.user_submitted": true,
+      }, { projection: { _id: 1 } });
+
+      if (!baseUserEnriched) {
+        console.log(
+          "[USDA Candidates] Skipping candidate search (base not user-enriched) for normalizedUPC16:",
+          normalizedUPC16
+        );
+        return res.json({
+          ok: true,
+          count: 0,
+          candidates: [],
+          searchString: null,
+          skipped: true,
+          reason: "base_not_user_enriched",
+          normalizedUPC16,
+        });
+      }
+    }
+
     console.log("[USDA Candidates] Incoming body:", req.body);
 
     // Build a text search string from whatever we have
