@@ -357,14 +357,21 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
       acc[cfg.field] = 0;
       return acc;
     }, {});
+    // Add water fields for both buckets
+    emptyTotals.water_from_drinks_ml = 0;
+    emptyTotals.water_total_ml = 0;
+    const emptyTotalsEstimated = { ...emptyTotals };
 
     await dailyTotalsCollection.updateOne(
       { userId: userObjectId, dateKey },
       {
         $set: {
           totals: emptyTotals,
+          totals_estimated: emptyTotalsEstimated,
           "totals.water_from_drinks_ml": 0,
           "totals.water_total_ml": 0,
+          "totals_estimated.water_from_drinks_ml": 0,
+          "totals_estimated.water_total_ml": 0,
           timezone: "UTC",
           updatedAt: now,
         },
@@ -490,14 +497,20 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
       acc[cfg.field] = 0;
       return acc;
     }, {});
+    emptyTotals.water_from_drinks_ml = 0;
+    emptyTotals.water_total_ml = 0;
+    const emptyTotalsEstimated = { ...emptyTotals };
 
     await dailyTotalsCollection.updateOne(
       { userId: userObjectId, dateKey },
       {
         $set: {
           totals: emptyTotals,
+          totals_estimated: emptyTotalsEstimated,
           "totals.water_from_drinks_ml": 0,
           "totals.water_total_ml": 0,
+          "totals_estimated.water_from_drinks_ml": 0,
+          "totals_estimated.water_total_ml": 0,
           timezone: "UTC",
           updatedAt: now,
         },
@@ -517,16 +530,24 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     .find({ _id: { $in: foodObjectIds } })
     .toArray();
 
-  // 4. Initialize daily totals
+  // 4. Initialize daily totals for both buckets
   const totals = Object.values(DAILY_PANEL_NUTRIENTS).reduce((acc, cfg) => {
     acc[cfg.field] = 0;
     return acc;
   }, {});
+  const totals_estimated = Object.values(DAILY_PANEL_NUTRIENTS).reduce((acc, cfg) => {
+    acc[cfg.field] = 0;
+    return acc;
+  }, {});
 
-  // Helper to safely add
-  const addToTotal = (field, value) => {
+  // Helpers for both buckets
+  const addToTotals = (field, value) => {
     if (typeof value !== "number" || Number.isNaN(value)) return;
     totals[field] += value;
+  };
+  const addToTotalsEstimated = (field, value) => {
+    if (typeof value !== "number" || Number.isNaN(value)) return;
+    totals_estimated[field] += value;
   };
 
   // 5. For each food, aggregate nutrients using:
@@ -555,51 +576,69 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
       const per100g = nutrient.per_100g ?? nutrient.per100g;
       const perServing = nutrient.per_serving ?? nutrient.perServing;
 
+      // Determine if this nutrient is estimated
+      const isEstimated =
+        nutrient.source === "off" ||
+        nutrient.dataQuality === "off" ||
+        (typeof nutrient.confidence === "number" && nutrient.confidence < 0.9);
+
       // Prefer per-serving when the user logged servings.
       // If perServing is missing but we have grams, fall back to per100g.
       if (servings && typeof perServing === "number") {
         let contribution = perServing * servings;
-
-        // Water from foods: per-serving is still in grams; store as mL.
         if (nutrient.key === "water" && cfg.field === "water_from_food_ml") {
           contribution = contribution * 1; // 1 g water ≈ 1 mL
         }
-
-        addToTotal(cfg.field, contribution);
+        if (isEstimated) {
+          addToTotalsEstimated(cfg.field, contribution);
+        } else {
+          addToTotals(cfg.field, contribution);
+        }
         continue;
       }
 
       if (grams && typeof per100g === "number") {
         let contribution = per100g * factor;
-
-        // Special-case: USDA water is reported in grams; store as mL for app hydration merging.
         if (nutrient.key === "water" && cfg.field === "water_from_food_ml") {
           contribution = contribution * 1; // 1 g water ≈ 1 mL
         }
-
-        addToTotal(cfg.field, contribution);
+        if (isEstimated) {
+          addToTotalsEstimated(cfg.field, contribution);
+        } else {
+          addToTotals(cfg.field, contribution);
+        }
       }
     }
   }
 
-  // 6. Round totals to something sane (e.g. 1 decimal place)
+  // 6. Round totals to something sane (e.g. 1 decimal place) for both buckets
   for (const [k, v] of Object.entries(totals)) {
     totals[k] = Math.round((v + Number.EPSILON) * 10) / 10;
+  }
+  for (const [k, v] of Object.entries(totals_estimated)) {
+    totals_estimated[k] = Math.round((v + Number.EPSILON) * 10) / 10;
   }
   // Tiny cleanup so we don't store -0
   for (const [k, v] of Object.entries(totals)) {
     if (Object.is(v, -0)) totals[k] = 0;
   }
+  for (const [k, v] of Object.entries(totals_estimated)) {
+    if (Object.is(v, -0)) totals_estimated[k] = 0;
+  }
 
   // Merge drink-water into daily totals and keep a combined total.
   totals.water_from_drinks_ml = Math.round((waterFromDrinksMl + Number.EPSILON) * 10) / 10;
   totals.water_total_ml = (Number(totals.water_from_food_ml) || 0) + (Number(totals.water_from_drinks_ml) || 0);
+  // For estimated, only add water_from_food_ml (from estimated bucket); drinks only go to main bucket
+  totals_estimated.water_from_drinks_ml = 0;
+  totals_estimated.water_total_ml = Number(totals_estimated.water_from_food_ml) || 0;
 
   // 7. Upsert into user_daily_totals
   const now = new Date();
   const update = {
     $set: {
       totals,
+      totals_estimated,
       timezone: "UTC", // TODO: switch to user's tz later
       updatedAt: now,
     },
