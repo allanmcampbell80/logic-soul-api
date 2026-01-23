@@ -376,10 +376,12 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     return;
   }
 
-  // 2. Aggregate total grams per foodId for that day, with a fallback to
-  // the food's serving size if the logged quantity is missing/zero or
-  // expressed in servings.
-  const foodGramsById = new Map(); // foodId string -> grams
+  // 2. Aggregate quantities by foodId for that day.
+  // We track grams (and ml treated as grams) separately from servings.
+  // This allows datasets like OFF that provide per-serving nutrients even when
+  // we don't have a reliable grams-per-serving.
+  const foodGramsById = new Map();    // foodId string -> grams
+  const foodServingsById = new Map(); // foodId string -> serving count
 
   for (const meal of meals) {
     for (const item of meal.items || []) {
@@ -395,6 +397,16 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
       const unit = String(unitRaw).toLowerCase();
       const value = typeof qty.value === "number" ? qty.value : null;
 
+      // Track servings separately when the unit is explicitly serving-like.
+      // This allows per-serving nutrient aggregation (e.g., OFF) without needing grams-per-serving.
+      const looksLikeServingUnit = unit.startsWith("serv");
+      if (looksLikeServingUnit) {
+        const servingsToAdd = value && value > 0 ? value : 1;
+        const prevServ = foodServingsById.get(foodIdStr) || 0;
+        foodServingsById.set(foodIdStr, prevServ + servingsToAdd);
+        continue;
+      }
+
       let gramsToAdd = 0;
 
       // Case 1: explicit grams
@@ -408,9 +420,9 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
         gramsToAdd = value;
 
       } else {
-        // Case 2: fallback to serving size when:
-        //  - unit looks like "serving"/"servings", OR
-        //  - value is missing/zero and we still want at least one serving
+        // Case 2: fallback to serving size (grams-per-serving) when:
+        //  - unit is not grams/ml and we still want a best-effort conversion
+        // NOTE: OFF may not have grams-per-serving; that's why we also support explicit serving units above.
         try {
           const food = await foodItemsCollection.findOne({
             _id: new ObjectId(foodIdStr),
@@ -450,10 +462,7 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
             continue;
           }
 
-          const looksLikeServingUnit = unit.startsWith("serv");
-          const servingsCount =
-            looksLikeServingUnit && value && value > 0 ? value : 1;
-
+          const servingsCount = value && value > 0 ? value : 1;
           gramsToAdd = gramsPerServing * servingsCount;
         } catch (err) {
           console.error(
@@ -474,8 +483,8 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     }
   }
 
-  if (!foodGramsById.size) {
-    console.log("[recomputeDailyNutritionTotals] no gram-based quantities found, writing zero totals");
+  if (!foodGramsById.size && !foodServingsById.size) {
+    console.log("[recomputeDailyNutritionTotals] no gram- or serving-based quantities found, writing zero totals");
     const now = new Date();
     const emptyTotals = Object.values(DAILY_PANEL_NUTRIENTS).reduce((acc, cfg) => {
       acc[cfg.field] = 0;
@@ -500,7 +509,10 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
   }
 
   // 3. Load the corresponding foods
-  const foodObjectIds = Array.from(foodGramsById.keys()).map((id) => new ObjectId(id));
+  const allFoodIds = Array.from(
+    new Set([...foodGramsById.keys(), ...foodServingsById.keys()])
+  );
+  const foodObjectIds = allFoodIds.map((id) => new ObjectId(id));
   const foods = await foodItemsCollection
     .find({ _id: { $in: foodObjectIds } })
     .toArray();
@@ -517,13 +529,18 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     totals[field] += value;
   };
 
-  // 5. For each food, scale per_100g nutrients by total grams eaten
+  // 5. For each food, aggregate nutrients using:
+  //   - per_100g scaled by grams eaten (g/ml), and/or
+  //   - per_serving scaled by serving count (serving)
   for (const food of foods) {
     const foodIdStr = food._id.toString();
     const grams = foodGramsById.get(foodIdStr) || 0;
-    if (!grams) continue;
+    const servings = foodServingsById.get(foodIdStr) || 0;
 
-    const factor = grams / 100.0;
+    // If we have neither grams nor servings, skip
+    if (!grams && !servings) continue;
+
+    const factor = grams ? grams / 100.0 : 0;
     const nutrients = food.nutrients || [];
 
     for (const nutrient of nutrients) {
@@ -535,18 +552,33 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
       const unit = nutrient.unit;
       if (cfg.unit && unit && String(unit) !== String(cfg.unit)) continue;
 
-      const per100g = nutrient.per_100g;
-      if (typeof per100g !== "number") continue;
+      const per100g = nutrient.per_100g ?? nutrient.per100g;
+      const perServing = nutrient.per_serving ?? nutrient.perServing;
 
-      let contribution = per100g * factor;
+      // Prefer per-serving when the user logged servings.
+      // If perServing is missing but we have grams, fall back to per100g.
+      if (servings && typeof perServing === "number") {
+        let contribution = perServing * servings;
 
-      // Special-case: USDA water is reported in grams; store as mL for app hydration merging.
-      if (nutrient.key === "water" && cfg.field === "water_from_food_ml") {
-        // 1 g water ≈ 1 mL
-        contribution = contribution * 1;
+        // Water from foods: per-serving is still in grams; store as mL.
+        if (nutrient.key === "water" && cfg.field === "water_from_food_ml") {
+          contribution = contribution * 1; // 1 g water ≈ 1 mL
+        }
+
+        addToTotal(cfg.field, contribution);
+        continue;
       }
 
-      addToTotal(cfg.field, contribution);
+      if (grams && typeof per100g === "number") {
+        let contribution = per100g * factor;
+
+        // Special-case: USDA water is reported in grams; store as mL for app hydration merging.
+        if (nutrient.key === "water" && cfg.field === "water_from_food_ml") {
+          contribution = contribution * 1; // 1 g water ≈ 1 mL
+        }
+
+        addToTotal(cfg.field, contribution);
+      }
     }
   }
 
