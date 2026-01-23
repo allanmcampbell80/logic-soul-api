@@ -404,13 +404,81 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
       const unit = String(unitRaw).toLowerCase();
       const value = typeof qty.value === "number" ? qty.value : null;
 
-      // Track servings separately when the unit is explicitly serving-like.
-      // This allows per-serving nutrient aggregation (e.g., OFF) without needing grams-per-serving.
+      // Serving-like units need special handling:
+      // - If the food has per-serving nutrients (common for OFF/label), aggregate by servings.
+      // - If the food does NOT have per-serving nutrients (common for USDA), convert servings -> grams
+      //   using serving_info/default_portion so per-100g nutrients can still roll up.
       const looksLikeServingUnit = unit.startsWith("serv");
+
+      // Cache per-food serving metadata to avoid repeated DB hits
+      // foodIdStr -> { gramsPerServing: number|null, hasPerServing: boolean }
+      // (Initialized lazily on first use)
+      if (!recomputeDailyNutritionTotals._servingMetaCache) {
+        recomputeDailyNutritionTotals._servingMetaCache = new Map();
+      }
+      const servingMetaCache = recomputeDailyNutritionTotals._servingMetaCache;
+
       if (looksLikeServingUnit) {
-        const servingsToAdd = value && value > 0 ? value : 1;
-        const prevServ = foodServingsById.get(foodIdStr) || 0;
-        foodServingsById.set(foodIdStr, prevServ + servingsToAdd);
+        const servingsCount = value && value > 0 ? value : 1;
+
+        let meta = servingMetaCache.get(foodIdStr);
+        if (!meta) {
+          let food = null;
+          try {
+            food = await foodItemsCollection.findOne({ _id: new ObjectId(foodIdStr) });
+          } catch (e) {
+            console.error("[recomputeDailyNutritionTotals] serving meta lookup failed", {
+              foodIdStr,
+              error: e?.message || e,
+            });
+          }
+
+          let gramsPerServing = null;
+
+          if (
+            food &&
+            food.serving_info &&
+            typeof food.serving_info.serving_size === "number"
+          ) {
+            const servingUnit = String(food.serving_info.serving_size_unit || "").toLowerCase();
+            if (servingUnit === "g" || servingUnit === "gram" || servingUnit === "grams") {
+              gramsPerServing = food.serving_info.serving_size;
+            }
+          }
+
+          if (
+            gramsPerServing == null &&
+            food &&
+            food.default_portion &&
+            typeof food.default_portion.gram_weight === "number"
+          ) {
+            gramsPerServing = food.default_portion.gram_weight;
+          }
+
+          // Detect whether this food actually has per-serving nutrients available
+          const nutrientsArr = Array.isArray(food?.nutrients) ? food.nutrients : [];
+          const hasPerServing = nutrientsArr.some((n) =>
+            typeof (n?.per_serving ?? n?.perServing) === "number"
+          );
+
+          meta = { gramsPerServing, hasPerServing };
+          servingMetaCache.set(foodIdStr, meta);
+        }
+
+        if (meta.hasPerServing) {
+          const prevServ = foodServingsById.get(foodIdStr) || 0;
+          foodServingsById.set(foodIdStr, prevServ + servingsCount);
+          continue;
+        }
+
+        // No per-serving nutrients: convert serving count -> grams so per-100g can be used.
+        if (typeof meta.gramsPerServing === "number" && meta.gramsPerServing > 0) {
+          const gramsToAdd = meta.gramsPerServing * servingsCount;
+          const prev = foodGramsById.get(foodIdStr) || 0;
+          foodGramsById.set(foodIdStr, prev + gramsToAdd);
+        }
+
+        // Whether we converted or not, we're done with this item.
         continue;
       }
 
@@ -818,6 +886,13 @@ export async function deleteUserMeal(db, userId, mealId) {
       console.error("[deleteUserMeal] recompute failed", e?.message || e);
     }
   }
+
+  return {
+    ok: true,
+    deletedCount: result.deletedCount ?? 0,
+    dateKey: dateKey || null,
+  };
+}
 
   return {
     ok: true,
