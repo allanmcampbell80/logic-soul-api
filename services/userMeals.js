@@ -331,6 +331,9 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     return null;
   };
 
+  // Debug logging for recompute
+  const DEBUG_RECOMPUTE = String(process.env.DEBUG_RECOMPUTE || "").toLowerCase() === "true";
+
   const toUnitString = (v) => (typeof v === "string" ? v.trim() : "");
 
   // 1. Load all meals for this user + date
@@ -350,7 +353,7 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
       for (const it of items) {
         const name = String(it?.name || "").trim().toLowerCase();
         const unit = String(it?.quantity?.unit || it?.quantityUnit || "").trim().toLowerCase();
-        const qty = typeof it?.quantity?.value === "number" ? it.quantity.value : null;
+        const qty = toNumber(it?.quantity?.value);
         if (name === "water" && unit === "ml" && Number.isFinite(qty) && qty > 0) {
           total += qty;
         }
@@ -479,6 +482,13 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
         }
 
         if (meta.hasPerServing) {
+          if (DEBUG_RECOMPUTE) {
+            console.log("[recomputeDailyNutritionTotals] servings+perServing", {
+              foodIdStr,
+              servingsCount,
+              meta,
+            });
+          }
           const prevServ = foodServingsById.get(foodIdStr) || 0;
           foodServingsById.set(foodIdStr, prevServ + servingsCount);
           continue;
@@ -487,6 +497,14 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
         // No per-serving nutrients: convert serving count -> grams so per-100g can be used.
         if (typeof meta.gramsPerServing === "number" && meta.gramsPerServing > 0) {
           const gramsToAdd = meta.gramsPerServing * servingsCount;
+          if (DEBUG_RECOMPUTE) {
+            console.log("[recomputeDailyNutritionTotals] servings->grams fallback", {
+              foodIdStr,
+              servingsCount,
+              gramsPerServing: meta.gramsPerServing,
+              gramsToAdd,
+            });
+          }
           const prev = foodGramsById.get(foodIdStr) || 0;
           foodGramsById.set(foodIdStr, prev + gramsToAdd);
         }
@@ -643,7 +661,7 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     if (!grams && !servings) continue;
 
     const factor = grams ? grams / 100.0 : 0;
-    const nutrients = food.nutrients || [];
+    const nutrients = Array.isArray(food?.nutrients) ? food.nutrients : [];
 
     for (const nutrient of nutrients) {
       const cfg = DAILY_PANEL_NUTRIENTS[nutrient.key];
@@ -665,6 +683,19 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
 
       // Prefer per-serving when the user logged servings.
       // If perServing is missing but we have grams, fall back to per100g.
+      if (DEBUG_RECOMPUTE && servings && perServing != null) {
+        console.log("[recomputeDailyNutritionTotals] nutrient perServing contribution", {
+          foodIdStr,
+          key: nutrient.key,
+          unit,
+          servings,
+          perServing,
+          isEstimated,
+          src,
+          dq,
+          conf,
+        });
+      }
       if (servings && typeof perServing === "number") {
         let contribution = perServing * servings;
         if (nutrient.key === "water" && cfg.field === "water_from_food_ml") {
