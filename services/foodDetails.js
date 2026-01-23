@@ -1,6 +1,5 @@
 // services/foodDetails.js
 import { ObjectId } from "mongodb";
-import { foodItemsCollection } from "./mongo.js";
 
 // --- OFF nutriments → normalized nutrients[] fallback ---
 
@@ -24,94 +23,326 @@ function buildOffNutrientsArray(off) {
   if (!off || typeof off !== "object") return [];
 
   // OFF is inconsistent: values may be per 100g or per serving, and units vary.
-  // For now, we derive a conservative per-100g baseline only when clearly available.
-  // If only per-serving exists, we still pass it as per100g to avoid hard rejects on the client;
-  // the app can treat OFF as lower-confidence data.
+  // We prefer true per-100g and true per-serving values when available.
+  // If only per-serving exists, we still mirror it into per_100g as a conservative fallback
+  // (to avoid hard rejects / empty nutrition), while keeping per_serving populated.
 
   const nutrients = [];
 
+  function addOffNutrient({ key, display_name, unit, per100gKeys, perServingKeys, normalize }) {
+    let per100g = pickFirstNumber(off, per100gKeys);
+    let perServing = pickFirstNumber(off, perServingKeys);
+
+    if (typeof normalize === "function") {
+      if (per100g !== null) per100g = normalize(per100g);
+      if (perServing !== null) perServing = normalize(perServing);
+    }
+
+    // Fallback: if per-100g missing but per-serving exists, mirror serving into per_100g
+    // so the client has something usable (still marked as OFF + lower confidence).
+    if (per100g === null && perServing !== null) {
+      per100g = perServing;
+    }
+
+    if (per100g === null && perServing === null) return;
+
+    nutrients.push({
+      key,
+      display_name,
+      unit,
+      per_100g: per100g,
+      per_serving: perServing,
+      source: "off",
+      data_quality: "off",
+      confidence: 0.6,
+    });
+  }
+
+  // --- Unit normalizers (heuristics) ---
+  const gToMgIfSmall = (v) => (v <= 10 ? v * 1000 : v); // e.g. 0.33 g -> 330 mg
+  const gToMgIfTiny = (v) => (v <= 1 ? v * 1000 : v); // e.g. 0.012 g -> 12 mg
+  const gToUgIfTiny = (v) => (v <= 1 ? v * 1_000_000 : v); // e.g. 0.00009 g -> 90 µg
+
   // Energy (kcal)
-  const kcal = pickFirstNumber(off, ["energy-kcal_100g", "energy-kcal", "energy_value"]);
-  if (kcal !== null) nutrients.push({ key: "energy_kcal", display_name: "Energy", unit: "kcal", per_100g: kcal, source: "off", data_quality: "off", confidence: 0.6 });
+  addOffNutrient({
+    key: "energy_kcal",
+    display_name: "Energy",
+    unit: "kcal",
+    per100gKeys: ["energy-kcal_100g"],
+    perServingKeys: ["energy-kcal_serving"],
+  });
 
   // Protein (g)
-  const protein = pickFirstNumber(off, ["proteins_100g", "proteins", "proteins_value", "proteins_serving"]);
-  if (protein !== null) nutrients.push({ key: "protein", display_name: "Protein", unit: "g", per_100g: protein, source: "off", data_quality: "off", confidence: 0.6 });
+  addOffNutrient({
+    key: "protein",
+    display_name: "Protein",
+    unit: "g",
+    per100gKeys: ["proteins_100g"],
+    perServingKeys: ["proteins_serving"],
+  });
 
   // Carbs (g)
-  const carbs = pickFirstNumber(off, ["carbohydrates_100g", "carbohydrates", "carbohydrates_value", "carbohydrates_serving"]);
-  if (carbs !== null) nutrients.push({ key: "carbohydrate", display_name: "Carbohydrate", unit: "g", per_100g: carbs, source: "off", data_quality: "off", confidence: 0.6 });
+  addOffNutrient({
+    key: "carbohydrate",
+    display_name: "Carbohydrate",
+    unit: "g",
+    per100gKeys: ["carbohydrates_100g"],
+    perServingKeys: ["carbohydrates_serving"],
+  });
 
   // Fat (g)
-  const fat = pickFirstNumber(off, ["fat_100g", "fat", "fat_value", "fat_serving"]);
-  if (fat !== null) nutrients.push({ key: "total_lipid_fat", display_name: "Total lipid (fat)", unit: "g", per_100g: fat, source: "off", data_quality: "off", confidence: 0.6 });
+  addOffNutrient({
+    key: "total_lipid_fat",
+    display_name: "Total lipid (fat)",
+    unit: "g",
+    per100gKeys: ["fat_100g"],
+    perServingKeys: ["fat_serving"],
+  });
 
   // Sugars (g)
-  const sugars = pickFirstNumber(off, ["sugars_100g", "sugars", "sugars_value", "sugars_serving"]);
-  if (sugars !== null) nutrients.push({ key: "total_sugars", display_name: "Total Sugars", unit: "g", per_100g: sugars, source: "off", data_quality: "off", confidence: 0.6 });
+  addOffNutrient({
+    key: "total_sugars",
+    display_name: "Total Sugars",
+    unit: "g",
+    per100gKeys: ["sugars_100g"],
+    perServingKeys: ["sugars_serving"],
+  });
 
   // Fiber (g)
-  const fiber = pickFirstNumber(off, ["fiber_100g", "fiber", "fiber_value", "fiber_serving"]);
-  if (fiber !== null) nutrients.push({ key: "fiber", display_name: "Fiber, total dietary", unit: "g", per_100g: fiber, source: "off", data_quality: "off", confidence: 0.6 });
+  addOffNutrient({
+    key: "fiber",
+    display_name: "Fiber, total dietary",
+    unit: "g",
+    per100gKeys: ["fiber_100g"],
+    perServingKeys: ["fiber_serving"],
+  });
 
-  // Sodium (mg) — OFF often stores sodium in grams (e.g. 0.33 g). Convert g → mg when value looks like grams.
-  let sodium = pickFirstNumber(off, ["sodium_100g", "sodium", "sodium_value", "sodium_serving"]);
-  if (sodium !== null) {
-    // Heuristic: if <= 10, assume grams → convert to mg.
-    const sodiumMg = sodium <= 10 ? sodium * 1000 : sodium;
-    nutrients.push({ key: "sodium", display_name: "Sodium, Na", unit: "mg", per_100g: sodiumMg, source: "off", data_quality: "off", confidence: 0.6 });
-  }
+  // Sodium (mg)
+  addOffNutrient({
+    key: "sodium",
+    display_name: "Sodium, Na",
+    unit: "mg",
+    per100gKeys: ["sodium_100g"],
+    perServingKeys: ["sodium_serving"],
+    normalize: gToMgIfSmall,
+  });
 
   // Saturated fat (g)
-  const satFat = pickFirstNumber(off, ["saturated-fat_100g", "saturated-fat", "saturated-fat_value", "saturated-fat_serving"]);
-  if (satFat !== null) {
-    nutrients.push({ key: "saturated_fat", display_name: "Saturated fat", unit: "g", per_100g: satFat, source: "off", data_quality: "off", confidence: 0.6 });
-  }
+  addOffNutrient({
+    key: "saturated_fat",
+    display_name: "Saturated fat",
+    unit: "g",
+    per100gKeys: ["saturated-fat_100g"],
+    perServingKeys: ["saturated-fat_serving"],
+  });
 
   // Salt (g)
-  const salt = pickFirstNumber(off, ["salt_100g", "salt", "salt_value", "salt_serving"]);
-  if (salt !== null) {
-    nutrients.push({ key: "salt", display_name: "Salt", unit: "g", per_100g: salt, source: "off", data_quality: "off", confidence: 0.6 });
+  addOffNutrient({
+    key: "salt",
+    display_name: "Salt",
+    unit: "g",
+    per100gKeys: ["salt_100g"],
+    perServingKeys: ["salt_serving"],
+  });
+
+  // Potassium (mg)
+  addOffNutrient({
+    key: "potassium",
+    display_name: "Potassium, K",
+    unit: "mg",
+    per100gKeys: ["potassium_100g"],
+    perServingKeys: ["potassium_serving"],
+    normalize: gToMgIfSmall,
+  });
+
+  // Calcium (mg)
+  addOffNutrient({
+    key: "calcium",
+    display_name: "Calcium, Ca",
+    unit: "mg",
+    per100gKeys: ["calcium_100g"],
+    perServingKeys: ["calcium_serving"],
+    normalize: gToMgIfSmall,
+  });
+
+  // Iron (mg)
+  addOffNutrient({
+    key: "iron",
+    display_name: "Iron, Fe",
+    unit: "mg",
+    per100gKeys: ["iron_100g"],
+    perServingKeys: ["iron_serving"],
+    normalize: gToMgIfTiny,
+  });
+
+  // Vitamin C (mg)
+  addOffNutrient({
+    key: "vitamin_c",
+    display_name: "Vitamin C",
+    unit: "mg",
+    per100gKeys: ["vitamin-c_100g"],
+    perServingKeys: ["vitamin-c_serving"],
+    normalize: gToMgIfTiny,
+  });
+
+  // Vitamin A (µg)
+  addOffNutrient({
+    key: "vitamin_a",
+    display_name: "Vitamin A",
+    unit: "µg",
+    per100gKeys: ["vitamin-a_100g"],
+    perServingKeys: ["vitamin-a_serving"],
+    normalize: gToUgIfTiny,
+  });
+
+  // --- Extra fallbacks for older OFF shapes ---
+  // Some OFF records may only have non-suffixed keys (e.g. "proteins") or *_value.
+  // If we still have nothing for a given nutrient, try those as a last resort.
+
+  if (!nutrients.some((n) => n.key === "energy_kcal")) {
+    addOffNutrient({
+      key: "energy_kcal",
+      display_name: "Energy",
+      unit: "kcal",
+      per100gKeys: ["energy-kcal_100g", "energy-kcal", "energy_value"],
+      perServingKeys: ["energy-kcal_serving", "energy-kcal", "energy_value"],
+    });
   }
 
-  // Potassium (mg) — OFF often stores potassium in grams. Convert g → mg when value looks like grams.
-  let potassium = pickFirstNumber(off, ["potassium_100g", "potassium", "potassium_value", "potassium_serving"]);
-  if (potassium !== null) {
-    // Heuristic: if <= 10, assume grams → convert to mg.
-    const potassiumMg = potassium <= 10 ? potassium * 1000 : potassium;
-    nutrients.push({ key: "potassium", display_name: "Potassium, K", unit: "mg", per_100g: potassiumMg, source: "off", data_quality: "off", confidence: 0.6 });
+  if (!nutrients.some((n) => n.key === "protein")) {
+    addOffNutrient({
+      key: "protein",
+      display_name: "Protein",
+      unit: "g",
+      per100gKeys: ["proteins_100g", "proteins", "proteins_value"],
+      perServingKeys: ["proteins_serving", "proteins", "proteins_value"],
+    });
   }
 
-  // Calcium (mg) — OFF often stores calcium in grams. Convert g → mg when value looks like grams.
-  let calcium = pickFirstNumber(off, ["calcium_100g", "calcium", "calcium_value", "calcium_serving"]);
-  if (calcium !== null) {
-    // Heuristic: if <= 10, assume grams → convert to mg.
-    const calciumMg = calcium <= 10 ? calcium * 1000 : calcium;
-    nutrients.push({ key: "calcium", display_name: "Calcium, Ca", unit: "mg", per_100g: calciumMg, source: "off", data_quality: "off", confidence: 0.6 });
+  if (!nutrients.some((n) => n.key === "carbohydrate")) {
+    addOffNutrient({
+      key: "carbohydrate",
+      display_name: "Carbohydrate",
+      unit: "g",
+      per100gKeys: ["carbohydrates_100g", "carbohydrates", "carbohydrates_value"],
+      perServingKeys: ["carbohydrates_serving", "carbohydrates", "carbohydrates_value"],
+    });
   }
 
-  // Iron (mg) — OFF often stores iron in grams. Convert g → mg when value looks like grams.
-  let iron = pickFirstNumber(off, ["iron_100g", "iron", "iron_value", "iron_serving"]);
-  if (iron !== null) {
-    // Heuristic: iron amounts are usually small; if <= 1, assume grams → convert to mg.
-    const ironMg = iron <= 1 ? iron * 1000 : iron;
-    nutrients.push({ key: "iron", display_name: "Iron, Fe", unit: "mg", per_100g: ironMg, source: "off", data_quality: "off", confidence: 0.6 });
+  if (!nutrients.some((n) => n.key === "total_lipid_fat")) {
+    addOffNutrient({
+      key: "total_lipid_fat",
+      display_name: "Total lipid (fat)",
+      unit: "g",
+      per100gKeys: ["fat_100g", "fat", "fat_value"],
+      perServingKeys: ["fat_serving", "fat", "fat_value"],
+    });
   }
 
-  // Vitamin C (mg) — OFF often stores vitamin C in grams. Convert g → mg when value looks like grams.
-  let vitC = pickFirstNumber(off, ["vitamin-c_100g", "vitamin-c", "vitamin-c_value", "vitamin-c_serving"]);
-  if (vitC !== null) {
-    // Heuristic: if <= 1, assume grams → convert to mg.
-    const vitCMg = vitC <= 1 ? vitC * 1000 : vitC;
-    nutrients.push({ key: "vitamin_c", display_name: "Vitamin C", unit: "mg", per_100g: vitCMg, source: "off", data_quality: "off", confidence: 0.6 });
+  if (!nutrients.some((n) => n.key === "total_sugars")) {
+    addOffNutrient({
+      key: "total_sugars",
+      display_name: "Total Sugars",
+      unit: "g",
+      per100gKeys: ["sugars_100g", "sugars", "sugars_value"],
+      perServingKeys: ["sugars_serving", "sugars", "sugars_value"],
+    });
   }
 
-  // Vitamin A (µg) — OFF often stores vitamin A in grams. Convert g → µg when value looks like grams.
-  let vitA = pickFirstNumber(off, ["vitamin-a_100g", "vitamin-a", "vitamin-a_value", "vitamin-a_serving"]);
-  if (vitA !== null) {
-    // Heuristic: if <= 1, assume grams → convert to µg.
-    const vitAUg = vitA <= 1 ? vitA * 1_000_000 : vitA;
-    nutrients.push({ key: "vitamin_a", display_name: "Vitamin A", unit: "µg", per_100g: vitAUg, source: "off", data_quality: "off", confidence: 0.6 });
+  if (!nutrients.some((n) => n.key === "fiber")) {
+    addOffNutrient({
+      key: "fiber",
+      display_name: "Fiber, total dietary",
+      unit: "g",
+      per100gKeys: ["fiber_100g", "fiber", "fiber_value"],
+      perServingKeys: ["fiber_serving", "fiber", "fiber_value"],
+    });
+  }
+
+  if (!nutrients.some((n) => n.key === "sodium")) {
+    addOffNutrient({
+      key: "sodium",
+      display_name: "Sodium, Na",
+      unit: "mg",
+      per100gKeys: ["sodium_100g", "sodium", "sodium_value"],
+      perServingKeys: ["sodium_serving", "sodium", "sodium_value"],
+      normalize: gToMgIfSmall,
+    });
+  }
+
+  if (!nutrients.some((n) => n.key === "saturated_fat")) {
+    addOffNutrient({
+      key: "saturated_fat",
+      display_name: "Saturated fat",
+      unit: "g",
+      per100gKeys: ["saturated-fat_100g", "saturated-fat", "saturated-fat_value"],
+      perServingKeys: ["saturated-fat_serving", "saturated-fat", "saturated-fat_value"],
+    });
+  }
+
+  if (!nutrients.some((n) => n.key === "salt")) {
+    addOffNutrient({
+      key: "salt",
+      display_name: "Salt",
+      unit: "g",
+      per100gKeys: ["salt_100g", "salt", "salt_value"],
+      perServingKeys: ["salt_serving", "salt", "salt_value"],
+    });
+  }
+
+  if (!nutrients.some((n) => n.key === "potassium")) {
+    addOffNutrient({
+      key: "potassium",
+      display_name: "Potassium, K",
+      unit: "mg",
+      per100gKeys: ["potassium_100g", "potassium", "potassium_value"],
+      perServingKeys: ["potassium_serving", "potassium", "potassium_value"],
+      normalize: gToMgIfSmall,
+    });
+  }
+
+  if (!nutrients.some((n) => n.key === "calcium")) {
+    addOffNutrient({
+      key: "calcium",
+      display_name: "Calcium, Ca",
+      unit: "mg",
+      per100gKeys: ["calcium_100g", "calcium", "calcium_value"],
+      perServingKeys: ["calcium_serving", "calcium", "calcium_value"],
+      normalize: gToMgIfSmall,
+    });
+  }
+
+  if (!nutrients.some((n) => n.key === "iron")) {
+    addOffNutrient({
+      key: "iron",
+      display_name: "Iron, Fe",
+      unit: "mg",
+      per100gKeys: ["iron_100g", "iron", "iron_value"],
+      perServingKeys: ["iron_serving", "iron", "iron_value"],
+      normalize: gToMgIfTiny,
+    });
+  }
+
+  if (!nutrients.some((n) => n.key === "vitamin_c")) {
+    addOffNutrient({
+      key: "vitamin_c",
+      display_name: "Vitamin C",
+      unit: "mg",
+      per100gKeys: ["vitamin-c_100g", "vitamin-c", "vitamin-c_value"],
+      perServingKeys: ["vitamin-c_serving", "vitamin-c", "vitamin-c_value"],
+      normalize: gToMgIfTiny,
+    });
+  }
+
+  if (!nutrients.some((n) => n.key === "vitamin_a")) {
+    addOffNutrient({
+      key: "vitamin_a",
+      display_name: "Vitamin A",
+      unit: "µg",
+      per100gKeys: ["vitamin-a_100g", "vitamin-a", "vitamin-a_value"],
+      perServingKeys: ["vitamin-a_serving", "vitamin-a", "vitamin-a_value"],
+      normalize: gToUgIfTiny,
+    });
   }
 
   return nutrients;
@@ -119,11 +350,56 @@ function buildOffNutrientsArray(off) {
 
 function ensureNutrientsFallback(doc) {
   const hasNutrients = Array.isArray(doc?.nutrients) && doc.nutrients.length > 0;
-  if (hasNutrients) return doc.nutrients;
+  const base = hasNutrients ? doc.nutrients : [];
 
   const off = doc?.off_nutriments;
   const derived = buildOffNutrientsArray(off);
-  return derived;
+
+  // If we have no derived OFF nutrients, just return what we already have.
+  if (!Array.isArray(derived) || derived.length === 0) {
+    return base;
+  }
+
+  // If there are no existing nutrients, use the derived OFF nutrients.
+  if (!hasNutrients) {
+    return derived;
+  }
+
+  // Merge: prefer existing values, but fill missing per_serving/per_100g from OFF when available.
+  const byKey = new Map();
+  for (const n of base) {
+    const k = n?.key;
+    if (k) byKey.set(k, n);
+  }
+
+  for (const offN of derived) {
+    const k = offN?.key;
+    if (!k) continue;
+
+    const existing = byKey.get(k);
+    if (!existing) {
+      base.push(offN);
+      byKey.set(k, offN);
+      continue;
+    }
+
+    // Fill missing numbers only (do not overwrite).
+    if ((existing.per_100g === null || existing.per_100g === undefined) && offN.per_100g !== null && offN.per_100g !== undefined) {
+      existing.per_100g = offN.per_100g;
+    }
+    if ((existing.per_serving === null || existing.per_serving === undefined) && offN.per_serving !== null && offN.per_serving !== undefined) {
+      existing.per_serving = offN.per_serving;
+    }
+
+    // Also fill metadata if missing.
+    if (!existing.source && offN.source) existing.source = offN.source;
+    if (!existing.data_quality && offN.data_quality) existing.data_quality = offN.data_quality;
+    if ((existing.confidence === null || existing.confidence === undefined) && typeof offN.confidence === "number") {
+      existing.confidence = offN.confidence;
+    }
+  }
+
+  return base;
 }
 
 /**
@@ -139,13 +415,12 @@ export async function getFoodDetails(db, ids) {
 
   // Convert incoming string IDs → ObjectId, skip invalid ones
   const objectIds = [];
-  const invalidIds = [];
 
   for (const id of ids) {
     try {
       objectIds.push(new ObjectId(String(id)));
     } catch {
-      invalidIds.push(id);
+      // ignore invalid id
     }
   }
 
@@ -185,7 +460,7 @@ export async function getFoodDetails(db, ids) {
 
     // Normalize nutrients to something easy for Swift:
     // - keep key, display label, unit, per_100g
-    // - ignore per_serving for now (you’ll compute based on actual portion)
+    // - perServing is optional; when present you can prefer it for "serving" quantities
     const nutrients = nutrientsArray.map((n) => ({
       key: n.key || null,
       label: n.display_name || null,
@@ -215,13 +490,6 @@ export async function getFoodDetails(db, ids) {
 
       // This is critical for “1 waffle = 35 g” type logic on-device
       defaultPortion: doc.default_portion || null,
-      // e.g.
-      // {
-      //   description: "waffle",
-      //   gram_weight: 35,
-      //   amount: 1,
-      //   unit: "undetermined"
-      // }
 
       // Canonical per-100g nutrient baseline for all calculations
       nutrients,
