@@ -1029,6 +1029,7 @@ app.post("/users/:id/meals", async (req, res) => {
     const recomputeDateKey = (result && result.dateKey) ? result.dateKey : (payload && payload.dateKey ? payload.dateKey : null);
 
     if (db && recomputeDateKey) {
+      // IMPORTANT: use the same coerced userId type as logUserMeal (ObjectId when possible)
       recomputeDailyNutritionTotals(db, userIdValue, recomputeDateKey).catch((err) => {
         console.error(
           "[Users/Meals] Failed to recompute daily nutrition totals:",
@@ -1146,16 +1147,9 @@ app.delete("/users/:id/meals/:mealId", async (req, res) => {
     }
 
     // NOTE:
-    // user_meals.userId may be stored as ObjectId or string. The service layer
-    // may query by exact type, so we pass an ObjectId when possible.
-    let userIdForDelete = userId;
-    if (typeof userId === "string" && /^[a-fA-F0-9]{24}$/.test(userId)) {
-      try {
-        userIdForDelete = new ObjectId(userId);
-      } catch {
-        userIdForDelete = userId;
-      }
-    }
+    // user_meals.userId has historically been stored as a string.
+    // Passing the raw string here avoids type-mismatch deletes.
+    const userIdForDelete = String(userId);
 
     const result = await deleteUserMeal(db, userIdForDelete, mealId);
 
