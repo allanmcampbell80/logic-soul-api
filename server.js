@@ -951,6 +951,7 @@ app.post("/users/:id/meals", async (req, res) => {
         error: "Missing required path parameter ':id' (userId).",
       });
     }
+    const userIdValue = coerceUserIdValue(userId);
 
     // Expecting payload shaped roughly like:
     // {
@@ -1005,7 +1006,7 @@ app.post("/users/:id/meals", async (req, res) => {
     const drinkWaterMl = extractDrinkWaterMlFromPayload(payload);
 
     // 1) Log the meal itself
-    const result = await logUserMeal(userId, payload);
+    const result = await logUserMeal(userIdValue, payload);
 
     // 1b) Increment awards tally for meals logged (best-effort; never block response)
     applyAwardEvent(db, { userId }, { eventKey: "mealsLogged", amount: 1 }).catch(
@@ -1028,7 +1029,7 @@ app.post("/users/:id/meals", async (req, res) => {
     const recomputeDateKey = (result && result.dateKey) ? result.dateKey : (payload && payload.dateKey ? payload.dateKey : null);
 
     if (db && recomputeDateKey) {
-      recomputeDailyNutritionTotals(db, userId, recomputeDateKey).catch((err) => {
+      recomputeDailyNutritionTotals(db, userIdValue, recomputeDateKey).catch((err) => {
         console.error(
           "[Users/Meals] Failed to recompute daily nutrition totals:",
           err
