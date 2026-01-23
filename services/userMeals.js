@@ -893,10 +893,3 @@ export async function deleteUserMeal(db, userId, mealId) {
     dateKey: dateKey || null,
   };
 }
-
-  return {
-    ok: true,
-    deletedCount: result.deletedCount ?? 0,
-    dateKey: dateKey || null,
-  };
-}
