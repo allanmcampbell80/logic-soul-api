@@ -139,6 +139,12 @@ const DAILY_PANEL_NUTRIENTS = {
   fatty_acids_total_monounsaturated: { field: "mono_fat_g", unit: "g" },
   fatty_acids_total_polyunsaturated: { field: "poly_fat_g", unit: "g" },
 
+  // OFF label-style keys (aliases) — map into the same daily fields
+  saturated_fat: { field: "sat_fat_g", unit: "g" },
+  trans_fat: { field: "trans_fat_g", unit: "g" },
+  monounsaturated_fat: { field: "mono_fat_g", unit: "g" },
+  polyunsaturated_fat: { field: "poly_fat_g", unit: "g" },
+
   // Common fatty-acid details (store now; derive SCFA/MCFA/LCFA and omegas in-app later)
   // Saturated chain lengths
   sfa_4_0: { field: "sfa_4_0_g", unit: "g" },
@@ -197,7 +203,13 @@ const DAILY_PANEL_NUTRIENTS = {
 
   // Micros — minerals
   sodium: { field: "sodium_mg", unit: "mg" },
+  // OFF sometimes provides salt (g). We store sodium separately, so keep salt as its own field if desired.
+  // If you later want to convert salt->sodium, do it explicitly (1 g salt ≈ 393 mg sodium).
   potassium_k: { field: "potassium_mg", unit: "mg" },
+  potassium: { field: "potassium_mg", unit: "mg" },
+  // Defensive alias for common misspelling in upstream sources.
+  // If present, we map it to the same daily potassium field.
+  pottasium: { field: "potassium_mg", unit: "mg" },
   calcium: { field: "calcium_mg", unit: "mg" },
   iron: { field: "iron_mg", unit: "mg" },
   magnesium_mg: { field: "magnesium_mg", unit: "mg" },
@@ -686,61 +698,76 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     const nutrients = Array.isArray(food?.nutrients) ? food.nutrients : [];
 
     for (const nutrient of nutrients) {
-      const cfg = DAILY_PANEL_NUTRIENTS[nutrient.key];
-      if (!cfg) continue; // skip nutrients we don't care about in the panel
+      try {
+        const nutrientKey = typeof nutrient?.key === "string" ? nutrient.key : "";
+        if (!nutrientKey) continue;
 
-      // Some datasets reuse the same `key` for different units (e.g., vitamin_a IU vs RAE µg).
-      // Only aggregate when the unit matches what we expect for this panel field.
-      const unit = toUnitString(nutrient.unit);
-      if (cfg.unit && unit && String(unit) !== String(cfg.unit)) continue;
+        const cfg = DAILY_PANEL_NUTRIENTS[nutrientKey];
+        if (!cfg) continue; // skip nutrients we don't care about in the panel
 
-      const per100g = toNumber(nutrient.per_100g ?? nutrient.per100g);
-      const perServing = toNumber(nutrient.per_serving ?? nutrient.perServing);
+        // Some datasets reuse the same `key` for different units (e.g., vitamin_a IU vs RAE µg).
+        // Only aggregate when the unit matches what we expect for this panel field.
+        const unit = toUnitString(nutrient.unit);
+        if (cfg.unit && unit && String(unit) !== String(cfg.unit)) continue;
 
-      // Determine if this nutrient is estimated
-      const src = toUnitString(nutrient.source).toLowerCase();
-      const dq = toUnitString(nutrient.dataQuality ?? nutrient.data_quality).toLowerCase();
-      const conf = toNumber(nutrient.confidence);
-      const isEstimated = src === "off" || dq === "off" || (conf != null && conf < 0.9);
+        const per100g = toNumber(nutrient.per_100g ?? nutrient.per100g);
+        const perServing = toNumber(nutrient.per_serving ?? nutrient.perServing);
 
-      // Prefer per-serving when the user logged servings.
-      // If perServing is missing but we have grams, fall back to per100g.
-      if (DEBUG_RECOMPUTE && servings && perServing != null) {
-        console.log("[recomputeDailyNutritionTotals] nutrient perServing contribution", {
-          foodIdStr,
-          key: nutrient.key,
-          unit,
-          servings,
-          perServing,
-          isEstimated,
-          src,
-          dq,
-          conf,
-        });
-      }
-      if (servings && typeof perServing === "number") {
-        let contribution = perServing * servings;
-        if (nutrient.key === "water" && cfg.field === "water_from_food_ml") {
-          contribution = contribution * 1; // 1 g water ≈ 1 mL
+        // Determine if this nutrient is estimated
+        const src = toUnitString(nutrient.source).toLowerCase();
+        const dq = toUnitString(nutrient.dataQuality ?? nutrient.data_quality).toLowerCase();
+        const conf = toNumber(nutrient.confidence);
+        const isEstimated = src === "off" || dq === "off" || (conf != null && conf < 0.9);
+
+        // Prefer per-serving when the user logged servings.
+        // If perServing is missing but we have grams, fall back to per100g.
+        if (DEBUG_RECOMPUTE && servings && perServing != null) {
+          console.log("[recomputeDailyNutritionTotals] nutrient perServing contribution", {
+            foodIdStr,
+            key: nutrientKey,
+            unit,
+            servings,
+            perServing,
+            isEstimated,
+            src,
+            dq,
+            conf,
+          });
         }
-        if (isEstimated) {
-          addToTotalsEstimated(cfg.field, contribution);
-        } else {
-          addToTotals(cfg.field, contribution);
+        if (servings && typeof perServing === "number") {
+          let contribution = perServing * servings;
+          if (nutrientKey === "water" && cfg.field === "water_from_food_ml") {
+            contribution = contribution * 1; // 1 g water ≈ 1 mL
+          }
+          if (isEstimated) {
+            addToTotalsEstimated(cfg.field, contribution);
+          } else {
+            addToTotals(cfg.field, contribution);
+          }
+          continue;
+        }
+
+        if (grams && typeof per100g === "number") {
+          let contribution = per100g * factor;
+          if (nutrientKey === "water" && cfg.field === "water_from_food_ml") {
+            contribution = contribution * 1; // 1 g water ≈ 1 mL
+          }
+          if (isEstimated) {
+            addToTotalsEstimated(cfg.field, contribution);
+          } else {
+            addToTotals(cfg.field, contribution);
+          }
+        }
+      } catch (e) {
+        // Never let a single malformed nutrient break the whole recompute.
+        if (DEBUG_RECOMPUTE) {
+          console.warn("[recomputeDailyNutritionTotals] skipping malformed nutrient", {
+            foodIdStr,
+            nutrient,
+            error: e?.message || e,
+          });
         }
         continue;
-      }
-
-      if (grams && typeof per100g === "number") {
-        let contribution = per100g * factor;
-        if (nutrient.key === "water" && cfg.field === "water_from_food_ml") {
-          contribution = contribution * 1; // 1 g water ≈ 1 mL
-        }
-        if (isEstimated) {
-          addToTotalsEstimated(cfg.field, contribution);
-        } else {
-          addToTotals(cfg.field, contribution);
-        }
       }
     }
   }
