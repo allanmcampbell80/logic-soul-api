@@ -321,6 +321,18 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
 
   console.log("[recomputeDailyNutritionTotals] userId:", userId, "dateKey:", dateKey);
 
+  // --- helpers for safe number/unit parsing ---
+  const toNumber = (v) => {
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "string") {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    }
+    return null;
+  };
+
+  const toUnitString = (v) => (typeof v === "string" ? v.trim() : "");
+
   // 1. Load all meals for this user + date
   const meals = await userMealsCollection
     .find({ userId: userObjectId, dateKey })
@@ -402,7 +414,7 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
       const qty = item.quantity || {};
       const unitRaw = qty.unit || item.quantityUnit || "g";
       const unit = String(unitRaw).toLowerCase();
-      const value = typeof qty.value === "number" ? qty.value : null;
+      const value = toNumber(qty.value);
 
       // Serving-like units need special handling:
       // - If the food has per-serving nutrients (common for OFF/label), aggregate by servings.
@@ -457,9 +469,10 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
 
           // Detect whether this food actually has per-serving nutrients available
           const nutrientsArr = Array.isArray(food?.nutrients) ? food.nutrients : [];
-          const hasPerServing = nutrientsArr.some((n) =>
-            typeof (n?.per_serving ?? n?.perServing) === "number"
-          );
+          const hasPerServing = nutrientsArr.some((n) => {
+            const ps = n?.per_serving ?? n?.perServing;
+            return toNumber(ps) != null;
+          });
 
           meta = { gramsPerServing, hasPerServing };
           servingMetaCache.set(foodIdStr, meta);
@@ -638,17 +651,17 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
 
       // Some datasets reuse the same `key` for different units (e.g., vitamin_a IU vs RAE µg).
       // Only aggregate when the unit matches what we expect for this panel field.
-      const unit = nutrient.unit;
+      const unit = toUnitString(nutrient.unit);
       if (cfg.unit && unit && String(unit) !== String(cfg.unit)) continue;
 
-      const per100g = nutrient.per_100g ?? nutrient.per100g;
-      const perServing = nutrient.per_serving ?? nutrient.perServing;
+      const per100g = toNumber(nutrient.per_100g ?? nutrient.per100g);
+      const perServing = toNumber(nutrient.per_serving ?? nutrient.perServing);
 
       // Determine if this nutrient is estimated
-      const isEstimated =
-        nutrient.source === "off" ||
-        nutrient.dataQuality === "off" ||
-        (typeof nutrient.confidence === "number" && nutrient.confidence < 0.9);
+      const src = toUnitString(nutrient.source).toLowerCase();
+      const dq = toUnitString(nutrient.dataQuality ?? nutrient.data_quality).toLowerCase();
+      const conf = toNumber(nutrient.confidence);
+      const isEstimated = src === "off" || dq === "off" || (conf != null && conf < 0.9);
 
       // Prefer per-serving when the user logged servings.
       // If perServing is missing but we have grams, fall back to per100g.
