@@ -2,6 +2,23 @@
 import { ObjectId } from "mongodb";
 import { usersCollection, userMealsCollection, foodItemsCollection } from "./mongo.js";
 
+// --- ObjectId helpers ---
+function coerceObjectId(value) {
+  if (!value) return null;
+  if (value instanceof ObjectId) return value;
+  if (typeof value === "string" && ObjectId.isValid(value)) return new ObjectId(value);
+  // Allow passing an object shaped like { $oid: "..." } defensively
+  if (typeof value === "object" && typeof value.$oid === "string" && ObjectId.isValid(value.$oid)) {
+    return new ObjectId(value.$oid);
+  }
+  return null;
+}
+
+function toObjectIdString(value) {
+  const oid = coerceObjectId(value);
+  return oid ? oid.toString() : (typeof value === "string" ? value : null);
+}
+
 // userMealsCollection should be initialized in mongo.js like:
 // export const userMealsCollection = db.collection("user_meals");
 
@@ -212,13 +229,14 @@ const DAILY_PANEL_NUTRIENTS = {
 };
 
 export async function logUserMeal(userId, payload) {
-  if (!ObjectId.isValid(userId)) {
+  const userObjectId = coerceObjectId(userId);
+  if (!userObjectId) {
     const err = new Error("Invalid userId");
     err.statusCode = 400;
     throw err;
   }
 
-  const userObjectId = new ObjectId(userId);
+  const userIdString = userObjectId.toString();
 
   // Make sure user exists
   const user = await usersCollection.findOne({ _id: userObjectId });
@@ -295,7 +313,7 @@ export async function logUserMeal(userId, payload) {
   // Shape a small response back to the app
   return {
     id: result.insertedId.toString(),
-    userId: userId,
+    userId: userIdString,
     loggedAt: loggedAtDate.toISOString(),
     dateKey,
     timezone: doc.timezone,
@@ -317,9 +335,13 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
   // We use the shared collections from mongo.js for meals and foods,
   // and only use `db` directly for the daily totals collection.
   const dailyTotalsCollection = db.collection("user_daily_totals");
-  const userObjectId = new ObjectId(userId);
+  const userObjectId = coerceObjectId(userId);
+  if (!userObjectId) {
+    console.warn("[recomputeDailyNutritionTotals] invalid userId", userId);
+    return;
+  }
 
-  console.log("[recomputeDailyNutritionTotals] userId:", userId, "dateKey:", dateKey);
+  console.log("[recomputeDailyNutritionTotals] userId:", userObjectId.toString(), "dateKey:", dateKey);
 
   // --- helpers for safe number/unit parsing ---
   const toNumber = (v) => {
@@ -849,7 +871,8 @@ function mapUserMealDoc(doc) {
 export async function getUserMealsForDate(db, userId, dateKey, opts = {}) {
   if (!db) throw new Error("DB not ready");
 
-  if (!ObjectId.isValid(userId)) {
+  const userObjectId = coerceObjectId(userId);
+  if (!userObjectId) {
     const err = new Error("Invalid userId");
     err.statusCode = 400;
     throw err;
@@ -865,8 +888,6 @@ export async function getUserMealsForDate(db, userId, dateKey, opts = {}) {
   const limit = Number.isFinite(Number(opts.limit))
     ? Math.max(1, Math.min(500, Number(opts.limit)))
     : 200;
-
-  const userObjectId = new ObjectId(userId);
 
   // NOTE: Some older docs might not have loggedAt; createdAt fallback keeps ordering sane.
   const docs = await userMealsCollection
@@ -890,7 +911,8 @@ export async function getUserMealsForDate(db, userId, dateKey, opts = {}) {
 export async function deleteUserMeal(db, userId, mealId) {
   if (!db) throw new Error("DB not ready");
 
-  if (!ObjectId.isValid(userId)) {
+  const userObjectId = coerceObjectId(userId);
+  if (!userObjectId) {
     const err = new Error("Invalid userId");
     err.statusCode = 400;
     throw err;
@@ -902,7 +924,6 @@ export async function deleteUserMeal(db, userId, mealId) {
     throw err;
   }
 
-  const userObjectId = new ObjectId(userId);
   const mealObjectId = new ObjectId(mealId);
 
   // Load the meal first so we know which day to recompute.
@@ -925,7 +946,7 @@ export async function deleteUserMeal(db, userId, mealId) {
   // Keep the daily rings / totals in sync
   if (dateKey) {
     try {
-      await recomputeDailyNutritionTotals(db, userId, dateKey);
+      await recomputeDailyNutritionTotals(db, userObjectId, dateKey);
     } catch (e) {
       console.error("[deleteUserMeal] recompute failed", e?.message || e);
     }
