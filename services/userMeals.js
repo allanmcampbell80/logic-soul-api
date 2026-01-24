@@ -383,6 +383,12 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
 
   // Debug logging for recompute
   const DEBUG_RECOMPUTE = String(process.env.DEBUG_RECOMPUTE || "").toLowerCase() === "true";
+  const debugLog = (...args) => {
+    if (DEBUG_RECOMPUTE) console.log(...args);
+  };
+  const debugWarn = (...args) => {
+    if (DEBUG_RECOMPUTE) console.warn(...args);
+  };
 
   const toUnitString = (v) => (typeof v === "string" ? v.trim() : "");
   // Normalize common unit variants so OFF/USDA differences don't silently drop nutrients.
@@ -399,6 +405,34 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     if (lower === "g") return "g";
     return s;
   };
+
+  // --- Safe mass-unit conversion (g <-> mg <-> µg) ---
+  function unitMultiplier(fromUnit, toUnit) {
+    const from = normalizeUnit(fromUnit);
+    const to = normalizeUnit(toUnit);
+    if (!from || !to) return null;
+    if (from === to) return 1;
+
+    // Only support mass conversions here (avoid kcal<->kJ, IU<->µg, etc.)
+    const mass = new Set(["g", "mg", "µg"]);
+    if (!mass.has(from) || !mass.has(to)) return null;
+
+    const scale = { "g": 1, "mg": 1e-3, "µg": 1e-6 };
+    const fromG = scale[from];
+    const toG = scale[to];
+    if (typeof fromG !== "number" || typeof toG !== "number") return null;
+
+    // Convert value in `from` to `to`:
+    // value_to = value_from * (from_in_g / to_in_g)
+    return fromG / toG;
+  }
+
+  function convertIfNeeded(value, fromUnit, toUnit) {
+    if (typeof value !== "number" || Number.isNaN(value)) return null;
+    const mult = unitMultiplier(fromUnit, toUnit);
+    if (mult == null) return null;
+    return value * mult;
+  }
 
   // 1. Load all meals for this user + date
   const meals = await userMealsCollection
@@ -546,13 +580,11 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
         }
 
         if (meta.hasPerServing) {
-          if (DEBUG_RECOMPUTE) {
-            console.log("[recomputeDailyNutritionTotals] servings+perServing", {
-              foodIdStr,
-              servingsCount,
-              meta,
-            });
-          }
+          debugLog("[recomputeDailyNutritionTotals] servings+perServing", {
+            foodIdStr,
+            servingsCount,
+            meta,
+          });
           const prevServ = foodServingsById.get(foodIdStr) || 0;
           foodServingsById.set(foodIdStr, prevServ + servingsCount);
           continue;
@@ -561,14 +593,12 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
         // No per-serving nutrients: convert serving count -> grams so per-100g can be used.
         if (typeof meta.gramsPerServing === "number" && meta.gramsPerServing > 0) {
           const gramsToAdd = meta.gramsPerServing * servingsCount;
-          if (DEBUG_RECOMPUTE) {
-            console.log("[recomputeDailyNutritionTotals] servings->grams fallback", {
-              foodIdStr,
-              servingsCount,
-              gramsPerServing: meta.gramsPerServing,
-              gramsToAdd,
-            });
-          }
+          debugLog("[recomputeDailyNutritionTotals] servings->grams fallback", {
+            foodIdStr,
+            servingsCount,
+            gramsPerServing: meta.gramsPerServing,
+            gramsToAdd,
+          });
           const prev = foodGramsById.get(foodIdStr) || 0;
           foodGramsById.set(foodIdStr, prev + gramsToAdd);
         }
@@ -736,13 +766,60 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
         if (!cfg) continue; // skip nutrients we don't care about in the panel
 
         // Some datasets reuse the same `key` for different units (e.g., vitamin_a IU vs RAE µg).
-        // Only aggregate when the unit matches what we expect for this panel field.
+        // Prefer exact unit match, but allow safe mass conversions (g <-> mg <-> µg) so OFF label data
+        // doesn't silently drop (e.g., sodium in g vs expected mg).
         const unit = normalizeUnit(toUnitString(nutrient.unit));
         const expectedUnit = normalizeUnit(cfg.unit);
-        if (expectedUnit && unit && String(unit) !== String(expectedUnit)) continue;
 
-        const per100g = toNumber(nutrient.per_100g ?? nutrient.per100g);
-        const perServing = toNumber(nutrient.per_serving ?? nutrient.perServing);
+        let per100g = toNumber(nutrient.per_100g ?? nutrient.per100g);
+        let perServing = toNumber(nutrient.per_serving ?? nutrient.perServing);
+
+        if (expectedUnit && unit && String(unit) !== String(expectedUnit)) {
+          const canConvert100g = per100g != null && convertIfNeeded(per100g, unit, expectedUnit) != null;
+          const canConvertServing = perServing != null && convertIfNeeded(perServing, unit, expectedUnit) != null;
+
+          if (!canConvert100g && !canConvertServing) {
+            debugLog("[recomputeDailyNutritionTotals] skip nutrient (unit mismatch)", {
+              foodIdStr,
+              key: nutrientKey,
+              unit,
+              expectedUnit,
+              hasPer100g: per100g != null,
+              hasPerServing: perServing != null,
+            });
+            continue;
+          }
+
+          if (per100g != null) {
+            const converted = convertIfNeeded(per100g, unit, expectedUnit);
+            if (converted != null) {
+              debugLog("[recomputeDailyNutritionTotals] converted per100g", {
+                foodIdStr,
+                key: nutrientKey,
+                fromUnit: unit,
+                toUnit: expectedUnit,
+                before: per100g,
+                after: converted,
+              });
+              per100g = converted;
+            }
+          }
+
+          if (perServing != null) {
+            const converted = convertIfNeeded(perServing, unit, expectedUnit);
+            if (converted != null) {
+              debugLog("[recomputeDailyNutritionTotals] converted perServing", {
+                foodIdStr,
+                key: nutrientKey,
+                fromUnit: unit,
+                toUnit: expectedUnit,
+                before: perServing,
+                after: converted,
+              });
+              perServing = converted;
+            }
+          }
+        }
 
         // Determine if this nutrient is estimated
         const src = toUnitString(nutrient.source).toLowerCase();
@@ -824,6 +901,25 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
   // For estimated, only add water_from_food_ml (from estimated bucket); drinks only go to main bucket
   totals_estimated.water_from_drinks_ml = 0;
   totals_estimated.water_total_ml = Number(totals_estimated.water_from_food_ml) || 0;
+
+  debugLog("[recomputeDailyNutritionTotals] water merge", {
+    dateKey,
+    waterFromDrinksMl,
+    water_from_food_ml: totals.water_from_food_ml,
+    water_from_drinks_ml: totals.water_from_drinks_ml,
+    water_total_ml: totals.water_total_ml,
+    est_water_from_food_ml: totals_estimated.water_from_food_ml,
+    est_water_total_ml: totals_estimated.water_total_ml,
+  });
+
+  debugLog("[recomputeDailyNutritionTotals] totals snapshot", {
+    dateKey,
+    totals,
+    totals_estimated,
+    foodsCount: foods.length,
+    gramsFoods: foodGramsById.size,
+    servingFoods: foodServingsById.size,
+  });
 
   // 7. Upsert into user_daily_totals
   const now = new Date();
