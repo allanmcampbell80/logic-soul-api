@@ -374,10 +374,26 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
   // --- helpers for safe number/unit parsing ---
   const toNumber = (v) => {
     if (typeof v === "number" && Number.isFinite(v)) return v;
+
     if (typeof v === "string") {
       const n = Number(v);
       return Number.isFinite(n) ? n : null;
     }
+
+    // Handle Mongo numeric wrappers (e.g., Decimal128) and other numeric-like objects.
+    // We rely on toString() and then Number(...) so this stays dataset-agnostic.
+    if (v && typeof v === "object") {
+      try {
+        const s = typeof v.toString === "function" ? String(v.toString()) : "";
+        if (s) {
+          const n = Number(s);
+          return Number.isFinite(n) ? n : null;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     return null;
   };
 
@@ -434,6 +450,80 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     return value * mult;
   }
 
+  // --- OFF fallback: synthesize a nutrients[] array from food.off_nutriments so serving-based meals work ---
+  function getNormalizedNutrientsForFood(food) {
+    const arr = Array.isArray(food?.nutrients) ? food.nutrients : [];
+    if (arr.length) return arr;
+
+    const off = food?.off_nutriments;
+    if (!off || typeof off !== "object") return [];
+
+    const out = [];
+
+    // Helper to push an OFF nutrient (supports both per 100g and per serving)
+    const pushOff = (offBaseKey, unifiedKey, fallbackUnit) => {
+      const unitRaw = off[`${offBaseKey}_unit`] || fallbackUnit || "";
+      const unit = unitRaw ? String(unitRaw) : "";
+
+      // OFF commonly stores *_100g and *_serving.
+      // If *_serving is missing, *_value is often present and usually corresponds to serving.
+      const per100g = toNumber(off[`${offBaseKey}_100g`]);
+      const perServing =
+        toNumber(off[`${offBaseKey}_serving`]) ??
+        toNumber(off[`${offBaseKey}_value`]) ??
+        toNumber(off[offBaseKey]);
+
+      if (per100g == null && perServing == null) return;
+
+      out.push({
+        key: unifiedKey,
+        unit,
+        per_100g: per100g,
+        per_serving: perServing,
+        source: "off",
+        dataQuality: "off",
+        confidence: 0.6,
+      });
+    };
+
+    // OFF key -> our unified nutrient key mapping
+    pushOff("energy-kcal", "energy_kcal", "kcal");
+    pushOff("proteins", "protein", "g");
+    pushOff("carbohydrates", "carbohydrate", "g");
+    pushOff("fat", "total_lipid_fat", "g");
+    pushOff("sugars", "total_sugars", "g");
+    pushOff("fiber", "fiber", "g");
+    pushOff("sodium", "sodium", "g");
+    pushOff("saturated-fat", "saturated_fat", "g");
+    pushOff("salt", "salt", "g");
+    pushOff("potassium", "potassium", "g");
+    pushOff("calcium", "calcium", "g");
+    pushOff("iron", "iron", "g");
+    pushOff("vitamin-c", "vitamin_c", "g");
+    pushOff("vitamin-a", "vitamin_a", "g");
+
+    return out;
+  }
+
+  function foodHasPerServingNutrients(food) {
+    // True if food.nutrients has any per-serving values OR OFF has any *_serving fields.
+    const nutrientsArr = Array.isArray(food?.nutrients) ? food.nutrients : [];
+    const hasPerServing = nutrientsArr.some((n) => {
+      const ps = n?.per_serving ?? n?.perServing;
+      return toNumber(ps) != null;
+    });
+    if (hasPerServing) return true;
+
+    const off = food?.off_nutriments;
+    if (!off || typeof off !== "object") return false;
+
+    // Cheap check: any key ending with _serving counts as per-serving data available.
+    // Also treat *_value as per-serving (OFF often uses *_value for the label/serving value).
+    return Object.keys(off).some((k) =>
+      typeof k === "string" && (k.endsWith("_serving") || k.endsWith("_value"))
+    );
+  }
+
   // 1. Load all meals for this user + date
   const meals = await userMealsCollection
     .find({ userId: userObjectId, dateKey })
@@ -449,11 +539,16 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     for (const meal of meals) {
       const items = Array.isArray(meal?.items) ? meal.items : [];
       for (const it of items) {
-        const name = String(it?.name || "").trim().toLowerCase();
-        const unit = String(it?.quantity?.unit || it?.quantityUnit || "").trim().toLowerCase();
-        const qty = toNumber(it?.quantity?.value);
-        if (name === "water" && unit === "ml" && Number.isFinite(qty) && qty > 0) {
-          total += qty;
+        try {
+          const name = String(it?.name || "").trim().toLowerCase();
+          const unit = String(it?.quantity?.unit || it?.quantityUnit || "").trim().toLowerCase();
+          const qty = toNumber(it?.quantity?.value);
+          if (name === "water" && unit === "ml" && Number.isFinite(qty) && qty > 0) {
+            total += qty;
+          }
+        } catch {
+          // never let a malformed hydration item break recompute
+          continue;
         }
       }
     }
@@ -481,10 +576,6 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
         $set: {
           totals: emptyTotals,
           totals_estimated: emptyTotalsEstimated,
-          "totals.water_from_drinks_ml": 0,
-          "totals.water_total_ml": 0,
-          "totals_estimated.water_from_drinks_ml": 0,
-          "totals_estimated.water_total_ml": 0,
           timezone: "UTC",
           updatedAt: now,
         },
@@ -502,6 +593,7 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
   // we don't have a reliable grams-per-serving.
   const foodGramsById = new Map();    // foodId string -> grams
   const foodServingsById = new Map(); // foodId string -> serving count
+  const servingMetaCache = new Map(); // foodId string -> { gramsPerServing, hasPerServing }
 
   for (const meal of meals) {
     for (const item of meal.items || []) {
@@ -514,8 +606,17 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
 
       const qty = item.quantity || {};
       const unitRaw = qty.unit || item.quantityUnit || "g";
-      const unit = String(unitRaw).toLowerCase();
+      const unit = String(unitRaw || "").trim().toLowerCase();
       const value = toNumber(qty.value);
+
+      debugLog("[recomputeDailyNutritionTotals] item parsed", {
+        foodIdStr,
+        name: item?.name || null,
+        value,
+        unit,
+        qtyRawUnit: unitRaw,
+        qtyRawValue: qty.value,
+      });
 
       // Serving-like units need special handling:
       // - If the food has per-serving nutrients (common for OFF/label), aggregate by servings.
@@ -523,13 +624,12 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
       //   using serving_info/default_portion so per-100g nutrients can still roll up.
       const looksLikeServingUnit = unit.startsWith("serv");
 
-      // Cache per-food serving metadata to avoid repeated DB hits
+      // Cache per-food serving metadata within this recompute run to avoid repeated DB hits.
       // foodIdStr -> { gramsPerServing: number|null, hasPerServing: boolean }
-      // (Initialized lazily on first use)
-      if (!recomputeDailyNutritionTotals._servingMetaCache) {
-        recomputeDailyNutritionTotals._servingMetaCache = new Map();
+      if (!servingMetaCache) {
+        // Defensive: should always exist, but keep this safe.
+        // eslint-disable-next-line no-use-before-define
       }
-      const servingMetaCache = recomputeDailyNutritionTotals._servingMetaCache;
 
       if (looksLikeServingUnit) {
         const servingsCount = value && value > 0 ? value : 1;
@@ -569,14 +669,17 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
           }
 
           // Detect whether this food actually has per-serving nutrients available
-          const nutrientsArr = Array.isArray(food?.nutrients) ? food.nutrients : [];
-          const hasPerServing = nutrientsArr.some((n) => {
-            const ps = n?.per_serving ?? n?.perServing;
-            return toNumber(ps) != null;
-          });
+          const hasPerServing = foodHasPerServingNutrients(food);
 
           meta = { gramsPerServing, hasPerServing };
           servingMetaCache.set(foodIdStr, meta);
+          debugLog("[recomputeDailyNutritionTotals] serving meta", {
+            foodIdStr,
+            gramsPerServing,
+            hasPerServing,
+            hasOff: Boolean(food?.off_nutriments),
+            nutrientsCount: Array.isArray(food?.nutrients) ? food.nutrients.length : 0,
+          });
         }
 
         if (meta.hasPerServing) {
@@ -700,10 +803,6 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
         $set: {
           totals: emptyTotals,
           totals_estimated: emptyTotalsEstimated,
-          "totals.water_from_drinks_ml": 0,
-          "totals.water_total_ml": 0,
-          "totals_estimated.water_from_drinks_ml": 0,
-          "totals_estimated.water_total_ml": 0,
           timezone: "UTC",
           updatedAt: now,
         },
@@ -755,7 +854,16 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     if (!grams && !servings) continue;
 
     const factor = grams ? grams / 100.0 : 0;
-    const nutrients = Array.isArray(food?.nutrients) ? food.nutrients : [];
+    const nutrients = getNormalizedNutrientsForFood(food);
+    if (DEBUG_RECOMPUTE && !Array.isArray(food?.nutrients) && food?.off_nutriments) {
+      console.log("[recomputeDailyNutritionTotals] using OFF nutrient fallback", {
+        foodIdStr,
+        name: food?.name || null,
+        nutrientCount: nutrients.length,
+        grams,
+        servings,
+      });
+    }
 
     for (const nutrient of nutrients) {
       try {
