@@ -136,8 +136,15 @@ export async function updateUserProfile(db, userId, profile) {
   const usersCollection = db.collection("users");
   const now = new Date();
 
-  // Now treat userId as Mongo _id
-  const query = { _id: new ObjectId(userId) };
+  // Treat userId as Mongo _id, but support legacy users where _id is stored as a string.
+  const cleanUserId = userId.trim();
+
+  let query;
+  if (ObjectId.isValid(cleanUserId)) {
+    query = { $or: [{ _id: new ObjectId(cleanUserId) }, { _id: cleanUserId }] };
+  } else {
+    query = { _id: cleanUserId };
+  }
 
   const updateDoc = {
     $set: {
@@ -152,10 +159,15 @@ export async function updateUserProfile(db, userId, profile) {
     },
   };
 
+  console.log("[updateUserProfile] using query:", query);
+
   const result = await usersCollection.findOneAndUpdate(
     query,
     updateDoc,
-    { returnDocument: "after" }
+    {
+      returnDocument: "after",
+      returnOriginal: false,
+    }
   );
 
   console.log("[updateUserProfile] findOneAndUpdate result:", {
@@ -163,13 +175,22 @@ export async function updateUserProfile(db, userId, profile) {
     lastErrorObject: result?.lastErrorObject,
   });
 
-  if (!result.value) {
+  let doc = result.value;
+
+  // Fallback in case the driver doesn't populate `value` (we've seen this on some deployments)
+  if (!doc) {
+    console.log("[updateUserProfile] value null, trying explicit findOne...");
+    doc = await usersCollection.findOne(query);
+    console.log("[updateUserProfile] fallback findOne found doc:", !!doc);
+  }
+
+  if (!doc) {
     const err = new Error("User not found");
     err.statusCode = 404;
     throw err;
   }
 
-  return mapUserDoc(result.value);
+  return mapUserDoc(doc);
 }
 
 
