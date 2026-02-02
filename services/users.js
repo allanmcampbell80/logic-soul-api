@@ -83,8 +83,8 @@ export async function deleteUserAndAllData(db, userId) {
       users: 1,
       user_meals: mealsDeleted,
       user_daily_totals: totalsDeleted,
-      user_analysis: analysisDeleted,
-      user_correlation_packs: correlationDeleted,
+      user_correlations: analysisDeleted,
+      user_analysis_correlation_packs: correlationDeleted,
     },
   };
 }
@@ -821,9 +821,6 @@ export async function recoverAccount(db, email, code, newDeviceId) {
     },
     { returnDocument: "after" }
   );
-
-  return mapUserDoc(result.value);
-}
 
   return mapUserDoc(result.value);
 }
