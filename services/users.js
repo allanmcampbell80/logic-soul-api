@@ -25,6 +25,71 @@ function mapUserDoc(user) {
   };
 }
 
+export async function deleteUserAndAllData(db, userId) {
+  if (!db) {
+    const err = new Error("DB not ready");
+    err.statusCode = 500;
+    throw err;
+  }
+
+  const cleaned = String(userId || "").trim();
+  if (!cleaned || !ObjectId.isValid(cleaned)) {
+    const err = new Error("Missing or invalid user id");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const _id = new ObjectId(cleaned);
+
+  const usersCol = db.collection("users");
+  const mealsCol = db.collection("user_meals");
+  const totalsCol = db.collection("user_daily_totals");
+
+  // Optional collections (safe even if you’re not using them yet)
+  const analysisCol = db.collection("user_analysis");
+  const correlationCol = db.collection("user_correlation_packs");
+
+  // Delete user first
+  const userDelete = await usersCol.deleteOne({ _id });
+  if (!userDelete || userDelete.deletedCount !== 1) {
+    const err = new Error("User not found");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const safeDeleteMany = async (col, filter) => {
+    try {
+      const r = await col.deleteMany(filter);
+      return r?.deletedCount ?? 0;
+    } catch (e) {
+      console.warn("[deleteUserAndAllData] deleteMany skipped:", e?.message || e);
+      return 0;
+    }
+  };
+
+  // user_meals: sometimes userId stored as string, sometimes ObjectId
+  const mealsDeleted = await safeDeleteMany(mealsCol, { $or: [{ userId: cleaned }, { userId: _id }] });
+
+  // user_daily_totals: usually ObjectId now, but delete both for safety
+  const totalsDeleted = await safeDeleteMany(totalsCol, { $or: [{ userId: cleaned }, { userId: _id }] });
+
+  const analysisDeleted = await safeDeleteMany(analysisCol, { $or: [{ userId: cleaned }, { userId: _id }] });
+  const correlationDeleted = await safeDeleteMany(correlationCol, { $or: [{ userId: cleaned }, { userId: _id }] });
+
+  return {
+    ok: true,
+    userId: cleaned,
+    deleted: {
+      users: 1,
+      user_meals: mealsDeleted,
+      user_daily_totals: totalsDeleted,
+      user_analysis: analysisDeleted,
+      user_correlation_packs: correlationDeleted,
+    },
+  };
+}
+
+
 export async function ensureUser(db, payload) {
   if (!db) throw new Error("DB not ready");
 
