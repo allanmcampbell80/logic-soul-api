@@ -4,7 +4,7 @@ import cors from "cors";
 import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import { findBestMatchesForMealItems } from "./services/mealSearch.js";
 import { buildUserEnrichedDoc, ensureSimpleIngredientsFromParsedList} from "./services/enrich.js";
-import { ensureUser, updateUserProfile, patchUserDailyTotals, storeUserEnergySamples, upsertUserEnergySnapshotForDate, addRecoveryEmail, verifyRecoveryEmail, recoverAccount, findUserIdByDeviceId } from "./services/users.js";
+import { deleteUserAndAllData, ensureUser, updateUserProfile, patchUserDailyTotals, storeUserEnergySamples, upsertUserEnergySnapshotForDate, addRecoveryEmail, verifyRecoveryEmail, recoverAccount, findUserIdByDeviceId } from "./services/users.js";
 import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, deleteUserMeal,} from "./services/userMeals.js";
 import { getFoodDetails } from "./services/foodDetails.js";
 import { getUserFavoritesByUserId, addUserFavoriteByUserId, deleteUserFavoriteByUserId,} from "./services/favorites.js";
@@ -162,6 +162,7 @@ function normalizeNutrientsForClient(nutrients) {
     };
   });
 }
+
 
 // Helper: attach Mongo _id of the USDA branded equivalent (if linked) so clients can submit either.
 // Uses doc.usda_equivalent.food_id when present; otherwise does a one-time lookup by normalized UPC.
@@ -815,6 +816,26 @@ app.post("/users/ensure", async (req, res) => {
     });
   }
 });
+
+
+//------------------------------------------------------------------------------------------------
+
+// DELETE /users/:id  → permanently delete user + all related data
+app.delete("/users/:id", async (req, res) => {
+  try {
+    const userId = String(req.params?.id || "").trim();
+    const result = await deleteUserAndAllData(db, userId);
+    return res.json(result);
+  } catch (err) {
+    console.error("[Users/Delete] Error:", err);
+    const status = err?.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err?.message || "Failed to delete user",
+    });
+  }
+});
+
 
 //--------------------------------------------------------------------------------------------------------
 
