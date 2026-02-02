@@ -46,8 +46,8 @@ export async function deleteUserAndAllData(db, userId) {
   const totalsCol = db.collection("user_daily_totals");
 
   // Optional collections (safe even if you’re not using them yet)
-  const analysisCol = db.collection("user_analysis");
-  const correlationCol = db.collection("user_correlation_packs");
+  const analysisCol = db.collection("user_correlations");
+  const correlationCol = db.collection("user_analysis_correlation_packs");
 
   // Delete user first
   const userDelete = await usersCol.deleteOne({ _id });
@@ -821,6 +821,9 @@ export async function recoverAccount(db, email, code, newDeviceId) {
     },
     { returnDocument: "after" }
   );
+
+  return mapUserDoc(result.value);
+}
 
   return mapUserDoc(result.value);
 }
