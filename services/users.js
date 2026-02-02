@@ -44,10 +44,8 @@ export async function deleteUserAndAllData(db, userId) {
   const usersCol = db.collection("users");
   const mealsCol = db.collection("user_meals");
   const totalsCol = db.collection("user_daily_totals");
-
-  // Optional collections (safe even if you’re not using them yet)
-  const analysisCol = db.collection("user_correlations");
-  const correlationCol = db.collection("user_analysis_correlation_packs");
+  const userCorrelationsCol = db.collection("user_correlations");
+  const analysisCorrelationPacksCol = db.collection("user_analysis_correlation_packs");
 
   // Delete user first
   const userDelete = await usersCol.deleteOne({ _id });
@@ -73,8 +71,8 @@ export async function deleteUserAndAllData(db, userId) {
   // user_daily_totals: usually ObjectId now, but delete both for safety
   const totalsDeleted = await safeDeleteMany(totalsCol, { $or: [{ userId: cleaned }, { userId: _id }] });
 
-  const analysisDeleted = await safeDeleteMany(analysisCol, { $or: [{ userId: cleaned }, { userId: _id }] });
-  const correlationDeleted = await safeDeleteMany(correlationCol, { $or: [{ userId: cleaned }, { userId: _id }] });
+  const userCorrelationsColDeleted = await safeDeleteMany(userCorrelationsCol, { $or: [{ userId: cleaned }, { userId: _id }] });
+  const analysisCorrelationPacksDeleted = await safeDeleteMany(analysisCorrelationPacksCol, { $or: [{ userId: cleaned }, { userId: _id }] });
 
   return {
     ok: true,
@@ -83,8 +81,8 @@ export async function deleteUserAndAllData(db, userId) {
       users: 1,
       user_meals: mealsDeleted,
       user_daily_totals: totalsDeleted,
-      user_correlations: analysisDeleted,
-      user_analysis_correlation_packs: correlationDeleted,
+      user_correlations: userCorrelationsColDeleted,
+      user_analysis_correlation_packs: analysisCorrelationPacksDeleted,
     },
   };
 }
