@@ -295,9 +295,30 @@ export async function logUserMeal(userId, payload) {
 
         const qtyUnit = qty?.unit ? String(qty.unit) : null;
 
+        // Canadian (primary) id
+        const primaryFoodIdRaw = it.canadianFoodId || it.originalFoodId || it.primaryFoodId || it.foodId;
+        // USDA equivalent id
+        const usdaEqRaw = it.usdaEquivalentFoodId || it.usda_equivalent_food_id || it.usdaFoodId;
+        // Toggle for using USDA equivalent
+        const useUsdaEq =
+          typeof it.useUSDAEquivalent === "boolean"
+            ? it.useUSDAEquivalent
+            : typeof it.useUsdaEquivalent === "boolean"
+              ? it.useUsdaEquivalent
+              : typeof it.use_usda_equivalent === "boolean"
+                ? it.use_usda_equivalent
+                : false;
+
         return {
           name: it.name,
-          foodId: it.foodId ? new ObjectId(it.foodId) : null,
+
+          // Always store the PRIMARY (typically Canadian) food id as the meal's foodId
+          foodId: primaryFoodIdRaw ? new ObjectId(primaryFoodIdRaw) : null,
+
+          // Preserve the USDA equivalent separately so daily totals can compute a delta
+          usdaEquivalentFoodId: usdaEqRaw ? new ObjectId(usdaEqRaw) : null,
+          useUSDAEquivalent: useUsdaEq,
+
           quantity: qty, // { value, unit, isEstimate, ... }
 
           // Keep a convenient top-level unit for older clients / debugging.
@@ -349,6 +370,8 @@ export async function logUserMeal(userId, payload) {
     items: safeItems.map((it) => ({
       name: it.name,
       foodId: it.foodId ? it.foodId.toString() : null,
+      usdaEquivalentFoodId: it.usdaEquivalentFoodId ? it.usdaEquivalentFoodId.toString() : null,
+      useUSDAEquivalent: Boolean(it.useUSDAEquivalent),
       quantity: it.quantity,
       quantityUnit: it.quantityUnit,
       confidence: it.confidence
@@ -594,6 +617,7 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
   const foodGramsById = new Map();    // foodId string -> grams
   const foodServingsById = new Map(); // foodId string -> serving count
   const servingMetaCache = new Map(); // foodId string -> { gramsPerServing, hasPerServing }
+  const normalizedItems = []; // array of { primaryFoodIdStr, grams, servings, usdaEquivalentFoodIdStr, useUSDAEquivalent }
 
   for (const meal of meals) {
     for (const item of meal.items || []) {
@@ -603,6 +627,14 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
         typeof item.foodId === "string"
           ? item.foodId
           : item.foodId.toString();
+
+      // Read USDA equivalent info
+      const usdaEqIdStr = item.usdaEquivalentFoodId
+        ? (typeof item.usdaEquivalentFoodId === "string"
+            ? item.usdaEquivalentFoodId
+            : item.usdaEquivalentFoodId.toString())
+        : null;
+      const useUsdaEq = Boolean(item.useUSDAEquivalent);
 
       const qty = item.quantity || {};
       const unitRaw = qty.unit || item.quantityUnit || "g";
@@ -690,6 +722,14 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
           });
           const prevServ = foodServingsById.get(foodIdStr) || 0;
           foodServingsById.set(foodIdStr, prevServ + servingsCount);
+          // Push normalized entry for per-serving
+          normalizedItems.push({
+            primaryFoodIdStr: foodIdStr,
+            grams: 0,
+            servings: servingsCount,
+            usdaEquivalentFoodIdStr: usdaEqIdStr,
+            useUSDAEquivalent: useUsdaEq,
+          });
           continue;
         }
 
@@ -704,6 +744,14 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
           });
           const prev = foodGramsById.get(foodIdStr) || 0;
           foodGramsById.set(foodIdStr, prev + gramsToAdd);
+          // Push normalized entry for fallback grams
+          normalizedItems.push({
+            primaryFoodIdStr: foodIdStr,
+            grams: gramsToAdd,
+            servings: 0,
+            usdaEquivalentFoodIdStr: usdaEqIdStr,
+            useUSDAEquivalent: useUsdaEq,
+          });
         }
 
         // Whether we converted or not, we're done with this item.
@@ -783,10 +831,18 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
 
       const prev = foodGramsById.get(foodIdStr) || 0;
       foodGramsById.set(foodIdStr, prev + gramsToAdd);
+      // Push normalized entry for grams path
+      normalizedItems.push({
+        primaryFoodIdStr: foodIdStr,
+        grams: gramsToAdd,
+        servings: 0,
+        usdaEquivalentFoodIdStr: usdaEqIdStr,
+        useUSDAEquivalent: useUsdaEq,
+      });
     }
   }
 
-  if (!foodGramsById.size && !foodServingsById.size) {
+  if (!foodGramsById.size && !foodServingsById.size && !normalizedItems.length) {
     console.log("[recomputeDailyNutritionTotals] no gram- or serving-based quantities found, writing zero totals");
     const now = new Date();
     const emptyTotals = Object.values(DAILY_PANEL_NUTRIENTS).reduce((acc, cfg) => {
@@ -814,8 +870,13 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
   }
 
   // 3. Load the corresponding foods
+  // Union foodGramsById keys, foodServingsById keys, and any usdaEquivalentFoodIdStr in normalizedItems
   const allFoodIds = Array.from(
-    new Set([...foodGramsById.keys(), ...foodServingsById.keys()])
+    new Set([
+      ...foodGramsById.keys(),
+      ...foodServingsById.keys(),
+      ...normalizedItems.map(e => e.usdaEquivalentFoodIdStr).filter(Boolean),
+    ])
   );
   const foodObjectIds = allFoodIds.map((id) => new ObjectId(id));
   const foods = await foodItemsCollection
@@ -842,28 +903,18 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     totals_estimated[field] += value;
   };
 
-  // 5. For each food, aggregate nutrients using:
-  //   - per_100g scaled by grams eaten (g/ml), and/or
-  //   - per_serving scaled by serving count (serving)
-  for (const food of foods) {
-    const foodIdStr = food._id.toString();
-    const grams = foodGramsById.get(foodIdStr) || 0;
-    const servings = foodServingsById.get(foodIdStr) || 0;
-
-    // If we have neither grams nor servings, skip
-    if (!grams && !servings) continue;
+  // Build a per-food contribution map for this specific consumed amount.
+  // Returns { byFieldAll, byFieldMain, byFieldEstimated } where:
+  // - byFieldAll includes ALL contributions regardless of estimated/confidence
+  // - byFieldMain includes only non-estimated contributions
+  // - byFieldEstimated includes only estimated contributions
+  function computeContributionMapsForFood(food, grams, servings) {
+    const byFieldAll = {};
+    const byFieldMain = {};
+    const byFieldEstimated = {};
 
     const factor = grams ? grams / 100.0 : 0;
     const nutrients = getNormalizedNutrientsForFood(food);
-    if (DEBUG_RECOMPUTE && !Array.isArray(food?.nutrients) && food?.off_nutriments) {
-      console.log("[recomputeDailyNutritionTotals] using OFF nutrient fallback", {
-        foodIdStr,
-        name: food?.name || null,
-        nutrientCount: nutrients.length,
-        grams,
-        servings,
-      });
-    }
 
     for (const nutrient of nutrients) {
       try {
@@ -871,11 +922,8 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
         if (!nutrientKey) continue;
 
         const cfg = DAILY_PANEL_NUTRIENTS[nutrientKey];
-        if (!cfg) continue; // skip nutrients we don't care about in the panel
+        if (!cfg) continue;
 
-        // Some datasets reuse the same `key` for different units (e.g., vitamin_a IU vs RAE µg).
-        // Prefer exact unit match, but allow safe mass conversions (g <-> mg <-> µg) so OFF label data
-        // doesn't silently drop (e.g., sodium in g vs expected mg).
         const unit = normalizeUnit(toUnitString(nutrient.unit));
         const expectedUnit = normalizeUnit(cfg.unit);
 
@@ -886,104 +934,90 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
           const canConvert100g = per100g != null && convertIfNeeded(per100g, unit, expectedUnit) != null;
           const canConvertServing = perServing != null && convertIfNeeded(perServing, unit, expectedUnit) != null;
 
-          if (!canConvert100g && !canConvertServing) {
-            debugLog("[recomputeDailyNutritionTotals] skip nutrient (unit mismatch)", {
-              foodIdStr,
-              key: nutrientKey,
-              unit,
-              expectedUnit,
-              hasPer100g: per100g != null,
-              hasPerServing: perServing != null,
-            });
-            continue;
-          }
+          if (!canConvert100g && !canConvertServing) continue;
 
           if (per100g != null) {
             const converted = convertIfNeeded(per100g, unit, expectedUnit);
-            if (converted != null) {
-              debugLog("[recomputeDailyNutritionTotals] converted per100g", {
-                foodIdStr,
-                key: nutrientKey,
-                fromUnit: unit,
-                toUnit: expectedUnit,
-                before: per100g,
-                after: converted,
-              });
-              per100g = converted;
-            }
+            if (converted != null) per100g = converted;
           }
-
           if (perServing != null) {
             const converted = convertIfNeeded(perServing, unit, expectedUnit);
-            if (converted != null) {
-              debugLog("[recomputeDailyNutritionTotals] converted perServing", {
-                foodIdStr,
-                key: nutrientKey,
-                fromUnit: unit,
-                toUnit: expectedUnit,
-                before: perServing,
-                after: converted,
-              });
-              perServing = converted;
-            }
+            if (converted != null) perServing = converted;
           }
         }
 
-        // Determine if this nutrient is estimated
         const src = toUnitString(nutrient.source).toLowerCase();
         const dq = toUnitString(nutrient.dataQuality ?? nutrient.data_quality).toLowerCase();
         const conf = toNumber(nutrient.confidence);
         const isEstimated = src === "off" || dq === "off" || (conf != null && conf < 0.9);
 
-        // Prefer per-serving when the user logged servings.
-        // If perServing is missing but we have grams, fall back to per100g.
-        if (DEBUG_RECOMPUTE && servings && perServing != null) {
-          console.log("[recomputeDailyNutritionTotals] nutrient perServing contribution", {
-            foodIdStr,
-            key: nutrientKey,
-            unit,
-            servings,
-            perServing,
-            isEstimated,
-            src,
-            dq,
-            conf,
-          });
-        }
+        let contribution = null;
         if (servings && typeof perServing === "number") {
-          let contribution = perServing * servings;
-          if (nutrientKey === "water" && cfg.field === "water_from_food_ml") {
-            contribution = contribution * 1; // 1 g water ≈ 1 mL
-          }
-          if (isEstimated) {
-            addToTotalsEstimated(cfg.field, contribution);
-          } else {
-            addToTotals(cfg.field, contribution);
-          }
-          continue;
+          contribution = perServing * servings;
+        } else if (grams && typeof per100g === "number") {
+          contribution = per100g * factor;
         }
 
-        if (grams && typeof per100g === "number") {
-          let contribution = per100g * factor;
-          if (nutrientKey === "water" && cfg.field === "water_from_food_ml") {
-            contribution = contribution * 1; // 1 g water ≈ 1 mL
-          }
-          if (isEstimated) {
-            addToTotalsEstimated(cfg.field, contribution);
-          } else {
-            addToTotals(cfg.field, contribution);
-          }
+        if (typeof contribution !== "number" || Number.isNaN(contribution)) continue;
+
+        // water is stored as mL (1 g ~ 1 mL)
+        if (nutrientKey === "water" && cfg.field === "water_from_food_ml") {
+          contribution = contribution * 1;
         }
-      } catch (e) {
-        // Never let a single malformed nutrient break the whole recompute.
-        if (DEBUG_RECOMPUTE) {
-          console.warn("[recomputeDailyNutritionTotals] skipping malformed nutrient", {
-            foodIdStr,
-            nutrient,
-            error: e?.message || e,
-          });
+
+        byFieldAll[cfg.field] = (byFieldAll[cfg.field] || 0) + contribution;
+        if (isEstimated) {
+          byFieldEstimated[cfg.field] = (byFieldEstimated[cfg.field] || 0) + contribution;
+        } else {
+          byFieldMain[cfg.field] = (byFieldMain[cfg.field] || 0) + contribution;
         }
+      } catch {
         continue;
+      }
+    }
+
+    return { byFieldAll, byFieldMain, byFieldEstimated };
+  }
+
+  function addMapInto(targetAdder, map) {
+    for (const [field, value] of Object.entries(map || {})) {
+      targetAdder(field, value);
+    }
+  }
+
+  function addDeltaIntoEstimated(primaryAll, usdaAll) {
+    for (const field of Object.keys(totals)) {
+      const p = Number(primaryAll?.[field] || 0);
+      const u = Number(usdaAll?.[field] || 0);
+      const delta = u - p;
+      if (Number.isFinite(delta) && delta > 0) {
+        addToTotalsEstimated(field, delta);
+      }
+    }
+  }
+
+  // 5. Aggregate nutrients per logged meal item so we can apply USDA-delta estimates
+  const foodsById = new Map(foods.map((f) => [f._id.toString(), f]));
+
+  for (const entry of normalizedItems) {
+    const primaryFood = foodsById.get(entry.primaryFoodIdStr);
+    if (!primaryFood) continue;
+
+    const grams = Number(entry.grams || 0);
+    const servings = Number(entry.servings || 0);
+
+    const primaryMaps = computeContributionMapsForFood(primaryFood, grams, servings);
+
+    // Add primary contributions into their respective buckets
+    addMapInto(addToTotals, primaryMaps.byFieldMain);
+    addMapInto(addToTotalsEstimated, primaryMaps.byFieldEstimated);
+
+    // If user chose USDA equivalent, add ONLY the positive difference (USDA - primary) into estimated
+    if (entry.useUSDAEquivalent && entry.usdaEquivalentFoodIdStr) {
+      const usdaFood = foodsById.get(entry.usdaEquivalentFoodIdStr);
+      if (usdaFood) {
+        const usdaMaps = computeContributionMapsForFood(usdaFood, grams, servings);
+        addDeltaIntoEstimated(primaryMaps.byFieldAll, usdaMaps.byFieldAll);
       }
     }
   }
