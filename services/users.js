@@ -67,10 +67,7 @@ export async function deleteUserAndAllData(db, userId) {
 
   // user_meals: sometimes userId stored as string, sometimes ObjectId
   const mealsDeleted = await safeDeleteMany(mealsCol, { $or: [{ userId: cleaned }, { userId: _id }] });
-
-  // user_daily_totals: usually ObjectId now, but delete both for safety
   const totalsDeleted = await safeDeleteMany(totalsCol, { $or: [{ userId: cleaned }, { userId: _id }] });
-
   const userCorrelationsColDeleted = await safeDeleteMany(userCorrelationsCol, { $or: [{ userId: cleaned }, { userId: _id }] });
   const analysisCorrelationPacksDeleted = await safeDeleteMany(analysisCorrelationPacksCol, { $or: [{ userId: cleaned }, { userId: _id }] });
 
