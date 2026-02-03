@@ -715,21 +715,43 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
         }
 
         if (meta.hasPerServing) {
+          // For label/OCR foods we often have per-serving nutrients, so we aggregate the PRIMARY food by servings.
+          // However, USDA equivalents are usually per-100g only (per_serving often null), so for the USDA-delta
+          // path we ALSO need a grams value for the same consumed amount.
+          const gramsForUsda =
+            typeof meta.gramsPerServing === "number" && meta.gramsPerServing > 0
+              ? meta.gramsPerServing * servingsCount
+              : 0;
+
           debugLog("[recomputeDailyNutritionTotals] servings+perServing", {
             foodIdStr,
             servingsCount,
+            gramsForUsda,
             meta,
           });
+
           const prevServ = foodServingsById.get(foodIdStr) || 0;
           foodServingsById.set(foodIdStr, prevServ + servingsCount);
-          // Push normalized entry for per-serving
+
+          // Push normalized entry with BOTH servings (for primary per-serving nutrients)
+          // and grams (so USDA per-100g nutrients can be computed for delta).
           normalizedItems.push({
             primaryFoodIdStr: foodIdStr,
-            grams: 0,
+            grams: gramsForUsda,
             servings: servingsCount,
             usdaEquivalentFoodIdStr: usdaEqIdStr,
             useUSDAEquivalent: useUsdaEq,
           });
+
+          if (useUsdaEq && usdaEqIdStr && (!gramsForUsda || Number.isNaN(gramsForUsda))) {
+            debugWarn("[recomputeDailyNutritionTotals] USDA delta may be skipped (missing gramsPerServing)", {
+              foodIdStr,
+              usdaEqIdStr,
+              servingsCount,
+              gramsPerServing: meta.gramsPerServing,
+            });
+          }
+
           continue;
         }
 
