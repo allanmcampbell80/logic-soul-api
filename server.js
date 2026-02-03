@@ -147,10 +147,19 @@ function normalizeNutrientsForClient(nutrients) {
     const display_name = n.display_name ?? n.displayName ?? null;
     const data_quality = n.data_quality ?? n.dataQuality ?? null;
 
+    // Stable row identifier to avoid collisions for legacy/survey nutrients
+    // Distinguish by key + unit + USDA nutrient id (when present)
+    const key = String(n.key || "");
+    const unit = String(n.unit || "").trim();
+    const usdaId = String(n.usda_nutrient_id || n.usdaNutrientId || "");
+    const row_id = `${key}|${unit}|${usdaId}`;
+
     // Preserve original keys, but add camelCase aliases so older iOS decoders
     // (that don't use convertFromSnakeCase) can still parse user-enriched docs.
     return {
       ...n,
+      row_id,
+      rowId: row_id,
       per_serving,
       perServing: per_serving,
       per_100g,
