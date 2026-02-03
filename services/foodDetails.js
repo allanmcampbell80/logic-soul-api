@@ -449,6 +449,11 @@ export async function getFoodDetails(db, ids) {
           off_meta: 1,
           source_dataset: 1,
           source: 1,
+
+          // USDA equivalent linkage (for Canadian barcode foods)
+          usda_equivalent: 1,
+          barcode: 1,
+          normalized_upc: 1,
         },
       }
     )
@@ -479,6 +484,22 @@ export async function getFoodDetails(db, ids) {
       normalizedName: doc.normalized_name || null,
       category: doc.category || null,
       foodType: doc.food_type || null,
+
+      // Expose barcode and normalized UPC at top level
+      barcode: doc.barcode || null,
+      normalizedUpc: doc.normalized_upc || null,
+
+      // Expose USDA equivalent linkage (stable shape)
+      usdaEquivalent: doc.usda_equivalent
+        ? {
+            foodId: doc.usda_equivalent.food_id ? String(doc.usda_equivalent.food_id) : null,
+            usdaFdcId: doc.usda_equivalent.usda_fdc_id ?? null,
+            normalizedUpc: doc.usda_equivalent.normalized_upc ?? null,
+            userVerified: !!doc.usda_equivalent.user_verified,
+            linkSource: doc.usda_equivalent.link_source ?? null,
+            linkedAt: doc.usda_equivalent.linked_at ?? null,
+          }
+        : null,
 
       brand: doc.brand
         ? {
