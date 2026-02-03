@@ -1002,6 +1002,74 @@ app.post("/users/:id/meals", async (req, res) => {
     // }
     const payload = req.body;
 
+    // --- Normalize meal items so we NEVER replace the Canadian/scanned foodId with the USDA equivalent.
+    // The client may optionally provide a USDA equivalent id plus a toggle.
+    // Goal:
+    //  - Store the *primary* (Canadian/off/user-enriched) id in `foodId`.
+    //  - Store the linked USDA id (if any) in `usdaEquivalentFoodId`.
+    //  - Store the toggle in `useUSDAEquivalent`.
+    // This allows recomputeDailyNutritionTotals to add confident totals from `foodId`,
+    // and add only the *delta* (USDA - Canadian) to totals_estimated when toggled on.
+    function normalizeMealItemsForUSDAEquivalent(payload) {
+      if (!payload || typeof payload !== "object") return payload;
+      const items = Array.isArray(payload.items) ? payload.items : [];
+
+      payload.items = items.map((it) => {
+        if (!it || typeof it !== "object") return it;
+
+        // Accept a few possible client field names (older/newer clients).
+        const canadianId = String(
+          it.canadianFoodId ||
+          it.originalFoodId ||
+          it.primaryFoodId ||
+          ""
+        ).trim();
+
+        const usdaEqId = String(
+          it.usdaEquivalentFoodId ||
+          it.usda_equivalent_food_id ||
+          it.usdaEquivalentId ||
+          ""
+        ).trim();
+
+        const wantsUSDA =
+          it.useUSDAEquivalent === true ||
+          it.useUsdaEquivalent === true ||
+          it.use_usda_equivalent === true;
+
+        // If the client provided a Canadian id, it must be the stored foodId.
+        // This fixes the bug where meals were being recorded as the USDA doc.
+        const storedFoodId = canadianId || (it.foodId != null ? String(it.foodId).trim() : "");
+
+        // If the client accidentally put the USDA id into foodId while also sending canadianFoodId,
+        // we correct it by forcing foodId=canadian and retaining the USDA id separately.
+        const correctedFoodId = canadianId ? canadianId : storedFoodId;
+
+        // Build a normalized item object, preserving all original fields.
+        const out = {
+          ...it,
+          foodId: correctedFoodId || it.foodId,
+        };
+
+        // Persist linkage fields when present
+        if (usdaEqId) {
+          out.usdaEquivalentFoodId = usdaEqId;
+          out.usda_equivalent_food_id = usdaEqId;
+        }
+
+        // Persist the toggle explicitly (default false)
+        out.useUSDAEquivalent = !!wantsUSDA;
+        out.useUsdaEquivalent = !!wantsUSDA;
+        out.use_usda_equivalent = !!wantsUSDA;
+
+        return out;
+      });
+
+      return payload;
+    }
+
+    normalizeMealItemsForUSDAEquivalent(payload);
+
     // Enforce logical-day dateKey (3am→3am) from now on.
     // If the client supplied a valid dateKey, we respect it.
     // Otherwise compute from loggedAt+timezone using the cutoff rule.
