@@ -1025,8 +1025,20 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
 
   function addDeltaIntoEstimated(primaryAll, usdaAll) {
     for (const field of Object.keys(totals)) {
-      const p = Number(primaryAll?.[field] || 0);
-      const u = Number(usdaAll?.[field] || 0);
+      const hasPrimary = Object.prototype.hasOwnProperty.call(primaryAll || {}, field);
+      const hasUsda = Object.prototype.hasOwnProperty.call(usdaAll || {}, field);
+
+      const p = hasPrimary ? Number(primaryAll?.[field]) : 0;
+      const u = hasUsda ? Number(usdaAll?.[field]) : 0;
+
+      // If USDA has a value but the primary food doesn't provide this nutrient at all,
+      // treat the USDA value as an estimated enrichment.
+      if (!hasPrimary && hasUsda && Number.isFinite(u) && u > 0) {
+        addToTotalsEstimated(field, u);
+        continue;
+      }
+
+      // Otherwise, only add the positive delta (USDA - primary).
       const delta = u - p;
       if (Number.isFinite(delta) && delta > 0) {
         addToTotalsEstimated(field, delta);
