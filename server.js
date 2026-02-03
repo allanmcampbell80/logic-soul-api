@@ -1070,6 +1070,27 @@ app.post("/users/:id/meals", async (req, res) => {
 
     normalizeMealItemsForUSDAEquivalent(payload);
 
+    // Debug: trace USDA-equivalent linkage coming from the client
+    try {
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      const toggled = items.filter((it) => it?.useUSDAEquivalent === true).length;
+      const withUsdaId = items.filter((it) => !!(it?.usdaEquivalentFoodId || it?.usda_equivalent_food_id)).length;
+      if (toggled > 0 || withUsdaId > 0) {
+        console.log("[Users/Meals] USDA-equivalent fields:", {
+          items: items.length,
+          toggled,
+          withUsdaId,
+          sample: items.slice(0, 2).map((it) => ({
+            foodId: it?.foodId,
+            useUSDAEquivalent: it?.useUSDAEquivalent,
+            usdaEquivalentFoodId: it?.usdaEquivalentFoodId || it?.usda_equivalent_food_id || null,
+          })),
+        });
+      }
+    } catch {
+      // ignore
+    }
+
     // Enforce logical-day dateKey (3am→3am) from now on.
     // If the client supplied a valid dateKey, we respect it.
     // Otherwise compute from loggedAt+timezone using the cutoff rule.
@@ -1128,7 +1149,7 @@ app.post("/users/:id/meals", async (req, res) => {
 
     if (db && recomputeDateKey) {
       // IMPORTANT: use the same coerced userId type as logUserMeal (ObjectId when possible)
-      recomputeDailyNutritionTotals(db, userIdValue, recomputeDateKey).catch((err) => {
+      recomputeDailyNutritionTotals(db, userIdValue, recomputeDateKey, timezone).catch((err) => {
         console.error(
           "[Users/Meals] Failed to recompute daily nutrition totals:",
           err
@@ -1415,9 +1436,20 @@ app.get("/users/:id/daily-totals", async (req, res) => {
       console.error("[Users/DailyTotals] Energy snapshot/finalize failed (best-effort):", energySnapErr);
     }
 
+    // IMPORTANT:
+    // user_daily_totals.userId may be stored as an ObjectId (newer docs) OR a string (older docs).
+    // Query both so the API returns totals regardless of storage type.
+    const userIdFilters = [{ userId: userIdValue }];
+    const userIdStr = String(userId || "").trim();
+    if (userIdStr && userIdStr !== String(userIdValue)) {
+      userIdFilters.push({ userId: userIdStr });
+    }
+
     const doc = await totalsCol.findOne({
-      userId: userIdValue,
-      dateKey,
+      $and: [
+        { $or: userIdFilters },
+        { dateKey },
+      ],
     });
 
     if (!doc) {
