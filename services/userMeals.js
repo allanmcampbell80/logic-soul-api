@@ -210,14 +210,30 @@ const DAILY_PANEL_NUTRIENTS = {
   // Defensive alias for common misspelling in upstream sources.
   // If present, we map it to the same daily potassium field.
   pottasium: { field: "potassium_mg", unit: "mg" },
+
   calcium: { field: "calcium_mg", unit: "mg" },
   iron: { field: "iron_mg", unit: "mg" },
+
+  // Some label/OCR foods use short keys without element suffixes.
+  // Keep both variants so USDA/label/OCR can be diffed reliably.
+  magnesium: { field: "magnesium_mg", unit: "mg" },
   magnesium_mg: { field: "magnesium_mg", unit: "mg" },
+
+  phosphorus: { field: "phosphorus_mg", unit: "mg" },
   phosphorus_p: { field: "phosphorus_mg", unit: "mg" },
+
+  zinc: { field: "zinc_mg", unit: "mg" },
   zinc_zn: { field: "zinc_mg", unit: "mg" },
+
+  copper: { field: "copper_mg", unit: "mg" },
   copper_cu: { field: "copper_mg", unit: "mg" },
+
+  selenium: { field: "selenium_ug", unit: "µg" },
   selenium_se: { field: "selenium_ug", unit: "µg" },
+
+  manganese: { field: "manganese_mg", unit: "mg" },
   manganese_mn: { field: "manganese_mg", unit: "mg" },
+
   iodine: { field: "iodine_ug", unit: "µg" },
   chromium_cr: { field: "chromium_ug", unit: "µg" },
 
