@@ -365,6 +365,7 @@ export async function logUserMeal(userId, payload) {
     const db = userMealsCollection?.db;
     if (db && dateKey) {
       await recomputeDailyNutritionTotals(db, userObjectId, dateKey);
+      await recomputeDailyIngredientExposure(db, userObjectId, dateKey);
     } else {
       console.warn("[logUserMeal] skip recompute (missing db/dateKey)", {
         hasDb: Boolean(db),
@@ -1140,6 +1141,217 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
   });
 }
 
+// --- Ingredient exposure (count-only) ---
+function normalizeIngredientToken(raw) {
+  if (raw == null) return null;
+  let s = String(raw).toLowerCase();
+
+  s = s.replace(/^[\s,;:.\-]+/, "");
+  s = s.replace(/[\s,;:.\-]+$/, "");
+  s = s.replace(/\s+/g, " ").trim();
+  if (!s) return null;
+
+  if (s.startsWith("(") && s.endsWith(")") && s.length > 2) {
+    s = s.slice(1, -1).trim();
+  }
+
+  return s || null;
+}
+
+function splitIngredientsTextSimple(ingredientsText) {
+  const text = typeof ingredientsText === "string" ? ingredientsText : "";
+  if (!text.trim()) return { definite: [], mayContain: [] };
+
+  const lower = text.toLowerCase();
+  const idx = lower.indexOf("may contain");
+
+  let definiteText = text;
+  let mayText = "";
+
+  if (idx >= 0) {
+    definiteText = text.slice(0, idx);
+    mayText = text.slice(idx);
+  }
+
+  const parseList = (s) => {
+    const cleaned = String(s || "")
+      .replace(/may contain\s*:?/i, "")
+      .replace(/contains\s*:?/i, "")
+      .replace(/[.]+/g, ",")
+      .trim();
+
+    const parts = cleaned.split(/[,;]+/g);
+    const out = [];
+    for (const p of parts) {
+      const t = normalizeIngredientToken(p);
+      if (t) out.push(t);
+    }
+    return out;
+  };
+
+  return {
+    definite: parseList(definiteText),
+    mayContain: parseList(mayText),
+  };
+}
+
+function extractIngredientsFromFoodDoc(food) {
+  const parsed = Array.isArray(food?.ingredients_parsed) ? food.ingredients_parsed : [];
+  const parsedNorm = parsed.map(normalizeIngredientToken).filter(Boolean);
+
+  if (parsedNorm.length) {
+    return { definite: parsedNorm, mayContain: [] };
+  }
+
+  const text = typeof food?.ingredients_text === "string" ? food.ingredients_text : null;
+  if (text && text.trim()) {
+    return splitIngredientsTextSimple(text);
+  }
+
+  return { definite: [], mayContain: [] };
+}
+
+function bumpCounts(map, tokens) {
+  if (!tokens || !tokens.length) return;
+  const unique = new Set(tokens); // count ingredient once per meal item
+  for (const t of unique) {
+    map.set(t, (map.get(t) || 0) + 1);
+  }
+}
+
+export async function recomputeDailyIngredientExposure(db, userId, dateKey) {
+  if (!db) throw new Error("DB not ready");
+  if (!userId || !dateKey) return;
+
+  const userObjectId = coerceObjectId(userId);
+  if (!userObjectId) {
+    console.warn("[recomputeDailyIngredientExposure] invalid userId", userId);
+    return;
+  }
+
+  const dailyTotalsCollection = db.collection("user_daily_totals");
+
+  // Load meals
+  const meals = await userMealsCollection.find({ userId: userObjectId, dateKey }).toArray();
+  const now = new Date();
+
+  if (!meals.length) {
+    await dailyTotalsCollection.updateOne(
+      { userId: userObjectId, dateKey },
+      {
+        $set: {
+          ingredients_exposure: {},
+          ingredients_exposure_may_contain: {},
+          ingredients_exposure_meta: {
+            uniqueCount: 0,
+            uniqueMayContainCount: 0,
+            totalMentions: 0,
+            totalMayContainMentions: 0,
+            updatedAt: now,
+          },
+          updatedAt: now,
+        },
+        $setOnInsert: { createdAt: now },
+      },
+      { upsert: true }
+    );
+    return;
+  }
+
+  // Collect food ids referenced in meals (primary + optional USDA equivalents)
+  const foodIdSet = new Set();
+  const itemRefs = [];
+
+  for (const meal of meals) {
+    const items = Array.isArray(meal?.items) ? meal.items : [];
+    for (const it of items) {
+      if (!it?.foodId) continue;
+
+      const primaryIdStr = typeof it.foodId === "string" ? it.foodId : it.foodId.toString();
+      const usdaEqIdStr = it.usdaEquivalentFoodId
+        ? (typeof it.usdaEquivalentFoodId === "string"
+            ? it.usdaEquivalentFoodId
+            : it.usdaEquivalentFoodId.toString())
+        : null;
+
+      const useUsdaEq = Boolean(it.useUSDAEquivalent);
+
+      foodIdSet.add(primaryIdStr);
+      if (usdaEqIdStr) foodIdSet.add(usdaEqIdStr);
+
+      itemRefs.push({ primaryIdStr, usdaEqIdStr, useUsdaEq });
+    }
+  }
+
+  const foodObjectIds = Array.from(foodIdSet)
+    .filter((id) => typeof id === "string" && ObjectId.isValid(id))
+    .map((id) => new ObjectId(id));
+
+  const foods = await foodItemsCollection
+    .find(
+      { _id: { $in: foodObjectIds } },
+      { projection: { ingredients_parsed: 1, ingredients_text: 1 } }
+    )
+    .toArray();
+
+  const foodsById = new Map(foods.map((f) => [f._id.toString(), f]));
+
+  const exposure = new Map();
+  const exposureMay = new Map();
+
+  for (const ref of itemRefs) {
+    const primaryFood = foodsById.get(ref.primaryIdStr);
+    if (!primaryFood) continue;
+
+    let { definite, mayContain } = extractIngredientsFromFoodDoc(primaryFood);
+
+    // If primary has none and USDA equivalent is enabled, fall back to USDA ingredients
+    if ((!definite?.length && !mayContain?.length) && ref.useUsdaEq && ref.usdaEqIdStr) {
+      const usdaFood = foodsById.get(ref.usdaEqIdStr);
+      if (usdaFood) {
+        const extracted = extractIngredientsFromFoodDoc(usdaFood);
+        definite = extracted.definite;
+        mayContain = extracted.mayContain;
+      }
+    }
+
+    bumpCounts(exposure, definite);
+    bumpCounts(exposureMay, mayContain);
+  }
+
+  const exposureObj = Object.fromEntries(exposure.entries());
+  const exposureMayObj = Object.fromEntries(exposureMay.entries());
+
+  const meta = {
+    uniqueCount: Object.keys(exposureObj).length,
+    uniqueMayContainCount: Object.keys(exposureMayObj).length,
+    totalMentions: Object.values(exposureObj).reduce((a, b) => a + (Number(b) || 0), 0),
+    totalMayContainMentions: Object.values(exposureMayObj).reduce((a, b) => a + (Number(b) || 0), 0),
+    updatedAt: now,
+  };
+
+  await dailyTotalsCollection.updateOne(
+    { userId: userObjectId, dateKey },
+    {
+      $set: {
+        ingredients_exposure: exposureObj,
+        ingredients_exposure_may_contain: exposureMayObj,
+        ingredients_exposure_meta: meta,
+        updatedAt: now,
+      },
+      $setOnInsert: { createdAt: now },
+    },
+    { upsert: true }
+  );
+
+  console.log("[recomputeDailyIngredientExposure] upserted", {
+    userId: userObjectId.toString(),
+    dateKey,
+    unique: meta.uniqueCount,
+    uniqueMay: meta.uniqueMayContainCount,
+  });
+}
+
 
 function normalizeDateKey(dateKey) {
   // Expect YYYY-MM-DD
@@ -1293,6 +1505,7 @@ export async function deleteUserMeal(db, userId, mealId) {
   if (dateKey) {
     try {
       await recomputeDailyNutritionTotals(db, userObjectId, dateKey);
+      await recomputeDailyIngredientExposure(db, userObjectId, dateKey);
     } catch (e) {
       console.error("[deleteUserMeal] recompute failed", e?.message || e);
     }
