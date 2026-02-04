@@ -42,6 +42,39 @@ async function initMongo() {
   db = client.db(dbName);
   collection = db.collection(collectionName);
   console.log("Connected to MongoDB, collection:", collectionName);
+
+  // Best-effort indexes (do not block server startup)
+  try {
+    // 1) De-dupe meal inserts when clients retry (or the app re-sends) using an idempotency key.
+    // Requirement: user_meals docs should include `idempotencyKey` (string).
+    // This partial unique index only applies when idempotencyKey is a non-empty string.
+    await db.collection("user_meals").createIndex(
+      { userId: 1, idempotencyKey: 1 },
+      {
+        unique: true,
+        name: "uniq_user_meals_userId_idempotencyKey",
+        partialFilterExpression: {
+          idempotencyKey: { $type: "string", $ne: "" },
+        },
+      }
+    );
+
+    // 2) One totals doc per user per dateKey.
+    await db.collection("user_daily_totals").createIndex(
+      { userId: 1, dateKey: 1 },
+      { unique: true, name: "uniq_user_daily_totals_userId_dateKey" }
+    );
+
+    // Helpful query indexes
+    await db.collection("user_meals").createIndex(
+      { userId: 1, dateKey: 1, loggedAt: -1 },
+      { name: "idx_user_meals_userId_dateKey_loggedAt" }
+    );
+
+    console.log("Mongo indexes ensured (best-effort)");
+  } catch (idxErr) {
+    console.error("[Mongo] Failed to ensure indexes (best-effort):", idxErr);
+  }
 }
 
 
