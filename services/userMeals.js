@@ -1,6 +1,7 @@
 // services/userMeals.js
 import { ObjectId } from "mongodb";
 import { usersCollection, userMealsCollection, foodItemsCollection } from "./mongo.js";
+import crypto from "crypto";
 
 // --- ObjectId helpers ---
 function coerceObjectId(value) {
@@ -283,6 +284,19 @@ export async function logUserMeal(userId, payload) {
     items            // array of meal items
   } = payload;
 
+  // Optional idempotency key (recommended): if the client retries, we can safely avoid duplicates.
+  const idempotencyKeyRaw =
+    payload?.idempotencyKey ||
+    payload?.requestId ||
+    payload?.clientRequestId ||
+    payload?.client_request_id ||
+    null;
+
+  const idempotencyKey =
+    typeof idempotencyKeyRaw === "string" && idempotencyKeyRaw.trim()
+      ? idempotencyKeyRaw.trim()
+      : null;
+
   const loggedAtDate = loggedAt ? new Date(loggedAt) : now;
 
   // Use the same logical-day rule as the API (3am→3am). If the client/server already
@@ -291,6 +305,98 @@ export async function logUserMeal(userId, payload) {
   const dateKey = isValidDateKey(payload?.dateKey)
     ? String(payload.dateKey)
     : computeLogicalDateKeyFromLoggedAt(loggedAtDate, tzForMeal, 3);
+
+  // If no explicit idempotency key is provided, create a deterministic one from the payload.
+  // This prevents accidental duplicates on network retries for the exact same meal payload.
+  const buildDeterministicKey = () => {
+    try {
+      const canonicalItems = Array.isArray(items)
+        ? items
+            .map((it) => {
+              const foodId = toObjectIdString(it.canadianFoodId || it.originalFoodId || it.primaryFoodId || it.foodId);
+              const usdaEq = toObjectIdString(it.usdaEquivalentFoodId || it.usda_equivalent_food_id || it.usdaFoodId);
+              const useUsdaEq =
+                typeof it.useUSDAEquivalent === "boolean"
+                  ? it.useUSDAEquivalent
+                  : typeof it.useUsdaEquivalent === "boolean"
+                    ? it.useUsdaEquivalent
+                    : typeof it.use_usda_equivalent === "boolean"
+                      ? it.use_usda_equivalent
+                      : false;
+
+              const qtyVal =
+                typeof it?.quantity?.value === "number"
+                  ? it.quantity.value
+                  : (typeof it.quantity === "number" ? it.quantity : null);
+
+              const qtyUnit =
+                typeof it?.quantity?.unit === "string"
+                  ? it.quantity.unit
+                  : (typeof it.quantityUnit === "string" ? it.quantityUnit : "g");
+
+              return {
+                name: typeof it?.name === "string" ? it.name : null,
+                foodId: foodId || null,
+                usdaEq: usdaEq || null,
+                useUsdaEq: Boolean(useUsdaEq),
+                qtyVal: typeof qtyVal === "number" && Number.isFinite(qtyVal) ? qtyVal : null,
+                qtyUnit: typeof qtyUnit === "string" ? qtyUnit : "g",
+              };
+            })
+            // stable ordering regardless of UI order
+            .sort((a, b) => String(a.foodId || a.name || "").localeCompare(String(b.foodId || b.name || "")))
+        : [];
+
+      // Round loggedAt to the minute so a retry doesn’t differ by milliseconds
+      const loggedAtMinute = new Date(loggedAtDate);
+      loggedAtMinute.setSeconds(0, 0);
+
+      const base = JSON.stringify({
+        userId: userIdString,
+        dateKey,
+        loggedAt: loggedAtMinute.toISOString(),
+        description: typeof description === "string" ? description.trim() : "",
+        items: canonicalItems,
+      });
+
+      return crypto.createHash("sha256").update(base).digest("hex");
+    } catch {
+      return null;
+    }
+  };
+
+  const effectiveIdempotencyKey = idempotencyKey || buildDeterministicKey();
+
+  // If we’ve already inserted this exact meal for this user, return the existing row instead of duplicating.
+  if (effectiveIdempotencyKey) {
+    const existing = await userMealsCollection.findOne({
+      userId: userObjectId,
+      idempotencyKey: effectiveIdempotencyKey,
+    });
+
+    if (existing) {
+      return {
+        id: existing._id.toString(),
+        userId: userIdString,
+        loggedAt: (existing.loggedAt instanceof Date ? existing.loggedAt : loggedAtDate).toISOString(),
+        dateKey: existing.dateKey || dateKey,
+        timezone: existing.timezone || tzForMeal,
+        description: existing.description || null,
+        items: Array.isArray(existing.items)
+          ? existing.items.map((it) => ({
+              name: it.name,
+              foodId: it.foodId ? it.foodId.toString() : null,
+              usdaEquivalentFoodId: it.usdaEquivalentFoodId ? it.usdaEquivalentFoodId.toString() : null,
+              useUSDAEquivalent: Boolean(it.useUSDAEquivalent),
+              quantity: it.quantity,
+              quantityUnit: it.quantityUnit,
+              confidence: it.confidence,
+            }))
+          : [],
+        deduped: true,
+      };
+    }
+  }
 
   const safeItems = Array.isArray(items)
     ? items.map((it) => {
@@ -348,6 +454,7 @@ export async function logUserMeal(userId, payload) {
 
   const doc = {
     userId: userObjectId,
+    idempotencyKey: effectiveIdempotencyKey || null,
     loggedAt: loggedAtDate,
     dateKey,
     timezone: tzForMeal,
@@ -1144,7 +1251,26 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
 // --- Ingredient exposure (count-only) ---
 function normalizeIngredientToken(raw) {
   if (raw == null) return null;
-  let s = String(raw).toLowerCase();
+
+  // If a parser stored ingredient tokens as objects, extract a usable string.
+  // This prevents keys like "[object Object]" from polluting exposure maps.
+  let candidate = raw;
+  if (candidate && typeof candidate === "object") {
+    const name =
+      (typeof candidate.name === "string" && candidate.name) ||
+      (typeof candidate.text === "string" && candidate.text) ||
+      (typeof candidate.value === "string" && candidate.value) ||
+      (typeof candidate.label === "string" && candidate.label) ||
+      null;
+
+    if (name) {
+      candidate = name;
+    } else {
+      return null;
+    }
+  }
+
+  let s = String(candidate).toLowerCase();
 
   s = s.replace(/^[\s,;:.\-]+/, "");
   s = s.replace(/[\s,;:.\-]+$/, "");
