@@ -518,6 +518,43 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
 
   console.log("[recomputeDailyNutritionTotals] userId:", userObjectId.toString(), "dateKey:", dateKey);
 
+  // Preserve any existing non-nutrition fields that are stored alongside nutrients in `totals`
+  // (e.g., check-in scalars like checkin_mood/clarity/outside, weather_* fields, etc.).
+  // We overwrite only the nutrient keys we compute, leaving everything else intact.
+  async function mergeWithExistingTotals(computedTotals, computedEstimated) {
+    const existing = await dailyTotalsCollection.findOne(
+      { userId: userObjectId, dateKey },
+      { projection: { totals: 1, totals_estimated: 1, timezone: 1 } }
+    );
+
+    const existingTotals = (existing && typeof existing.totals === "object" && existing.totals) ? existing.totals : {};
+    const existingEstimated = (existing && typeof existing.totals_estimated === "object" && existing.totals_estimated) ? existing.totals_estimated : {};
+
+    const computedKeys = new Set(Object.keys(computedTotals || {}));
+    const computedEstimatedKeys = new Set(Object.keys(computedEstimated || {}));
+
+    const extras = {};
+    for (const [k, v] of Object.entries(existingTotals)) {
+      if (!computedKeys.has(k)) extras[k] = v;
+    }
+
+    const extrasEstimated = {};
+    for (const [k, v] of Object.entries(existingEstimated)) {
+      if (!computedEstimatedKeys.has(k)) extrasEstimated[k] = v;
+    }
+
+    // Put extras first so computed values always win.
+    const mergedTotals = { ...extras, ...(computedTotals || {}) };
+    const mergedEstimated = { ...extrasEstimated, ...(computedEstimated || {}) };
+
+    // Prefer the existing timezone if present; otherwise keep whatever the caller sets.
+    const preservedTimezone = (existing && typeof existing.timezone === "string" && existing.timezone.trim())
+      ? existing.timezone.trim()
+      : null;
+
+    return { mergedTotals, mergedEstimated, preservedTimezone };
+  }
+
   // --- helpers for safe number/unit parsing ---
   const toNumber = (v) => {
     if (typeof v === "number" && Number.isFinite(v)) return v;
@@ -717,13 +754,18 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     emptyTotals.water_total_ml = 0;
     const emptyTotalsEstimated = { ...emptyTotals };
 
+    const { mergedTotals, mergedEstimated, preservedTimezone } = await mergeWithExistingTotals(
+      emptyTotals,
+      emptyTotalsEstimated
+    );
+
     await dailyTotalsCollection.updateOne(
       { userId: userObjectId, dateKey },
       {
         $set: {
-          totals: emptyTotals,
-          totals_estimated: emptyTotalsEstimated,
-          timezone: "UTC",
+          totals: mergedTotals,
+          totals_estimated: mergedEstimated,
+          timezone: preservedTimezone || "UTC",
           updatedAt: now,
         },
         $setOnInsert: { createdAt: now },
@@ -999,13 +1041,18 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     emptyTotals.water_total_ml = 0;
     const emptyTotalsEstimated = { ...emptyTotals };
 
+    const { mergedTotals, mergedEstimated, preservedTimezone } = await mergeWithExistingTotals(
+      emptyTotals,
+      emptyTotalsEstimated
+    );
+
     await dailyTotalsCollection.updateOne(
       { userId: userObjectId, dateKey },
       {
         $set: {
-          totals: emptyTotals,
-          totals_estimated: emptyTotalsEstimated,
-          timezone: "UTC",
+          totals: mergedTotals,
+          totals_estimated: mergedEstimated,
+          timezone: preservedTimezone || "UTC",
           updatedAt: now,
         },
         $setOnInsert: { createdAt: now },
@@ -1223,11 +1270,17 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
 
   // 7. Upsert into user_daily_totals
   const now = new Date();
+
+  const { mergedTotals, mergedEstimated, preservedTimezone } = await mergeWithExistingTotals(
+    totals,
+    totals_estimated
+  );
+
   const update = {
     $set: {
-      totals,
-      totals_estimated,
-      timezone: "UTC", // TODO: switch to user's tz later
+      totals: mergedTotals,
+      totals_estimated: mergedEstimated,
+      timezone: preservedTimezone || "UTC", // TODO: switch to user's tz later
       updatedAt: now,
     },
     $setOnInsert: {
