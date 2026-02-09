@@ -1,5 +1,18 @@
 // services/utils.js
 
+// Helper: Coerce userId to the same type used in Mongo (ObjectId when possible, else string)
+export function coerceUserIdValue(userId) {
+  const s = String(userId || "").trim();
+  if (s && ObjectId.isValid(s)) {
+    try {
+      return new ObjectId(s);
+    } catch {
+      // fall through to string
+    }
+  }
+  return s;
+}
+
 export function notIgnoredQuery() {
   return { "moderation.is_ignored": { $ne: true } };
 }
