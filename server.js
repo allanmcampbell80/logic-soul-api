@@ -8,7 +8,7 @@ import { findBestMatchesForMealItems, enrichMealSearchResultWithUSDAEquivalent }
 import { buildUserEnrichedDoc, ensureSimpleIngredientsFromParsedList} from "./services/enrich.js";
 import { deleteUserAndAllData, ensureUser, updateUserProfile, patchUserDailyTotals, storeUserEnergySamples, 
 upsertUserEnergySnapshotForDate, addRecoveryEmail, verifyRecoveryEmail, recoverAccount, findUserIdByDeviceId, 
-coerceUserIdValue, isValidDateKey, dateFromDateKeyUTC, dateKeyFromDateUTC, addDaysDateKeyUTC,
+isValidDateKey, dateFromDateKeyUTC, dateKeyFromDateUTC, addDaysDateKeyUTC,
 computeLogicalDateKeyFromLoggedAt, getFavoritesForRequest} from "./services/users.js";
 import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, deleteUserMeal,} from "./services/userMeals.js";
 import { getFoodDetails, attachUSDAEquivalentFoodIdToCandidates, attachUSDAEquivalentFoodIdToDoc, chooseBestCanadianDocForUPC, 
