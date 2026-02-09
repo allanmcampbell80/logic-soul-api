@@ -1,5 +1,7 @@
 // services/utils.js
 
+import { ObjectId } from "mongodb"; 
+
 // Helper: Coerce userId to the same type used in Mongo (ObjectId when possible, else string)
 export function coerceUserIdValue(userId) {
   const s = String(userId || "").trim();
