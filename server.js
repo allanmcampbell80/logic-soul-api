@@ -1432,7 +1432,7 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
     //    - user-submitted OCR/label docs first (richer + cleaned)
     //    - then OFF/import Canadian docs
     //    This ensures the client sees the best-available representation.
-    doc = await chooseBestCanadianDocForUPC(normalized);
+    doc = await chooseBestCanadianDocForUPC(db, normalized);
 
     if (doc) {
       if (Array.isArray(doc.nutrients)) {
