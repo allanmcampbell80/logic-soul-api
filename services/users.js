@@ -254,7 +254,7 @@ export async function updateUserProfile(db, userId, profile) {
 }
 
 
-function coerceUserId(userId) {
+export function coerceUserId(userId) {
   // Coerce userId into an ObjectId if it looks like one
   let userIdValue = userId;
   if (typeof userId === "string" && /^[a-fA-F0-9]{24}$/.test(userId)) {
