@@ -349,9 +349,6 @@ export async function patchUserDailyTotals(db, userId, dateKey, patch, timezone)
 // -------------------------------
 // Energy samples (time-series)
 
-function isValidDateKey(v) {
-  return typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
-}
 
 function cleanEnergySamples(raw) {
   const arr = Array.isArray(raw) ? raw : [];
@@ -818,4 +815,137 @@ export async function recoverAccount(db, email, code, newDeviceId) {
   );
 
   return mapUserDoc(result.value);
+}
+
+// --- DateKey helpers (UTC-safe) ---
+export function isValidDateKey(dateKey) {
+  return typeof dateKey === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateKey);
+}
+
+export function dateFromDateKeyUTC(dateKey) {
+  // dateKey is YYYY-MM-DD
+  const [y, m, d] = dateKey.split("-").map((v) => parseInt(v, 10));
+  return new Date(Date.UTC(y, (m || 1) - 1, d || 1));
+}
+
+export function dateKeyFromDateUTC(dt) {
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(dt.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+export function addDaysDateKeyUTC(dateKey, days) {
+  const dt = dateFromDateKeyUTC(dateKey);
+  dt.setUTCDate(dt.getUTCDate() + (Number(days) || 0));
+  return dateKeyFromDateUTC(dt);
+}
+
+// --- Logical day helpers (local timezone with cutoff hour) ---
+// A "logical day" is defined as [cutoffHour..cutoffHour) in the user's timezone.
+// Example (cutoffHour=3): 1:30am Jan 15 local → counts toward Jan 14.
+export function safeTimeZone(tz) {
+  const s = typeof tz === "string" ? tz.trim() : "";
+  return s.length > 0 ? s : null;
+}
+
+export function dateKeyFromInstantInTimeZone(dt, timeZone) {
+  // dt is a Date representing an instant.
+  // Return YYYY-MM-DD in the provided IANA timezone.
+  try {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+
+    const parts = fmt.formatToParts(dt);
+    const y = parts.find((p) => p.type === "year")?.value;
+    const m = parts.find((p) => p.type === "month")?.value;
+    const d = parts.find((p) => p.type === "day")?.value;
+    if (y && m && d) return `${y}-${m}-${d}`;
+
+    const s = fmt.format(dt);
+    if (typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  } catch {
+    // ignore
+  }
+
+  // Fallback: UTC dateKey
+  return dateKeyFromDateUTC(dt);
+}
+
+export function computeLogicalDateKeyFromLoggedAt(loggedAt, timezone, cutoffHour = 3) {
+  // loggedAt can be ISO string, number (ms), or Date.
+  let dt;
+  if (loggedAt instanceof Date) dt = loggedAt;
+  else if (typeof loggedAt === "number" && Number.isFinite(loggedAt)) dt = new Date(loggedAt);
+  else dt = new Date(String(loggedAt || ""));
+
+  if (!dt || Number.isNaN(dt.getTime())) {
+    dt = new Date();
+  }
+
+  const tz = safeTimeZone(timezone);
+
+  // Shift the instant backwards by cutoffHour so that the dateKey boundary becomes cutoffHour.
+  const shifted = new Date(dt.getTime() - (Number(cutoffHour) || 0) * 60 * 60 * 1000);
+
+  return tz ? dateKeyFromInstantInTimeZone(shifted, tz) : dateKeyFromDateUTC(shifted);
+}
+
+export async function getFavoritesForRequest(db, req) {
+  try {
+    if (!db) return { favoriteFoodIds: [], favoriteDocs: [], favoriteMeta: {} };
+
+    const deviceId = String(
+      req?.headers?.["x-device-id"] || req?.headers?.["X-Device-Id"] || ""
+    ).trim();
+
+    if (!deviceId) return { favoriteFoodIds: [], favoriteDocs: [], favoriteMeta: {} };
+
+    const userId = await findUserIdByDeviceId(db, deviceId);
+    if (!userId) return { favoriteFoodIds: [], favoriteDocs: [], favoriteMeta: {} };
+
+    // Fetch favorites directly from users collection instead of getUserFavoritesByUserId
+    const usersCol = db.collection("users");
+
+    // Support legacy users where _id may be stored as a string.
+    let query;
+    if (ObjectId.isValid(userId)) {
+      query = { $or: [{ _id: new ObjectId(userId) }, { _id: userId }] };
+    } else {
+      query = { _id: userId };
+    }
+
+    const userDoc = await usersCol.findOne(
+      query,
+      { projection: { favorites: 1 } }
+    );
+
+    const favorites = Array.isArray(userDoc?.favorites) ? userDoc.favorites : [];
+
+    const favoriteFoodIds = favorites
+      .map((f) => f.foodIdString || (f?.foodId ? String(f.foodId) : null))
+      .filter(Boolean);
+
+    // Build a simple id -> addedAt(ms) map for recency tie-breaking
+    const favoriteMeta = {};
+    for (const f of favorites) {
+      const id = f?.foodIdString || (f?.foodId ? String(f.foodId) : null);
+      if (!id) continue;
+      const ts = f?.addedAt ? new Date(f.addedAt).getTime() : null;
+      if (ts) favoriteMeta[id] = ts;
+    }
+
+    return {
+      favoriteFoodIds,
+      favoriteDocs: favorites,
+      favoriteMeta,
+    };
+  } catch (err) {
+    console.error("[MealSearch] Failed to load favorites for request:", err);
+    return { favoriteFoodIds: [], favoriteDocs: [], favoriteMeta: {} };
+  }
 }
