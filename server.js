@@ -3,14 +3,14 @@ import express from "express";
 import cors from "cors";
 import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import { notIgnoredQuery, safeTrimString, hasNonEmptyArray, isLikelyDvBoilerplate, scoreCanadianDoc, normalizeNutrientsForClient, 
-isBarcodeLockedParsedMealItem, normalizeBarcodeTo16, coerceUserIdValue} from "./services/utils.js";
+isBarcodeLockedParsedMealItem, normalizeBarcodeTo16, 
+ } from "./services/utils.js";
 import { findBestMatchesForMealItems, enrichMealSearchResultWithUSDAEquivalent } from "./services/mealSearch.js";
 import { buildUserEnrichedDoc, ensureSimpleIngredientsFromParsedList} from "./services/enrich.js";
 import { deleteUserAndAllData, ensureUser, updateUserProfile, patchUserDailyTotals, storeUserEnergySamples, 
-upsertUserEnergySnapshotForDate, addRecoveryEmail, verifyRecoveryEmail, recoverAccount, findUserIdByDeviceId, 
-isValidDateKey, dateFromDateKeyUTC, dateKeyFromDateUTC, addDaysDateKeyUTC,
+upsertUserEnergySnapshotForDate, addRecoveryEmail, verifyRecoveryEmail, recoverAccount, findUserIdByDeviceId, isValidDateKey, dateFromDateKeyUTC, dateKeyFromDateUTC, addDaysDateKeyUTC,
 computeLogicalDateKeyFromLoggedAt, getFavoritesForRequest} from "./services/users.js";
-import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, deleteUserMeal,} from "./services/userMeals.js";
+import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, deleteUserMeal} from "./services/userMeals.js";
 import { getFoodDetails, attachUSDAEquivalentFoodIdToCandidates, attachUSDAEquivalentFoodIdToDoc, chooseBestCanadianDocForUPC, 
 fetchBestDocForBarcode, makeBarcodeLockedCandidateFromDoc,  } from "./services/foodDetails.js";
 import { getUserFavoritesByUserId, addUserFavoriteByUserId, deleteUserFavoriteByUserId,} from "./services/favorites.js";
@@ -100,6 +100,7 @@ const REPORT_REASONS = new Set([
   "nutrition_data_wrong",
   "other",
 ]);
+
 
 //-----------------------------------------------------------------------------------------------------
 
@@ -655,6 +656,127 @@ app.post("/users/:id/meals", async (req, res) => {
     }
 
     normalizeMealItemsForUSDAEquivalent(payload);
+
+    // --- Normalize quantities so calculations use canonical units (g/ml/serving) when provided.
+    // The client may send BOTH:
+    //  - UI quantity: quantity + quantityUnit (e.g. 3 slice)
+    //  - Normalized quantity: normalizedQuantity + normalizedQuantityUnit (e.g. 36 g)
+    // Rule:
+    //  - If normalizedQuantity/unit is present and valid, we store the UI quantity in uiQuantity/uiQuantityUnit
+    //    and replace quantity/quantityUnit with the normalized values for downstream calculations.
+    //  - We also keep the normalizedQuantity* fields intact for auditing/debug.
+    function normalizeMealItemsForNormalizedQuantity(payload) {
+      if (!payload || typeof payload !== "object") return payload;
+      const items = Array.isArray(payload.items) ? payload.items : [];
+
+      const isFiniteNumber = (v) => typeof v === "number" && Number.isFinite(v);
+
+      const normalizeUnit = (u) => {
+        const raw = String(u || "").trim().toLowerCase();
+        if (!raw) return "";
+        if (raw === "grams") return "g";
+        if (raw === "milliliters" || raw === "millilitres") return "ml";
+        if (raw === "servings") return "serving";
+        return raw;
+      };
+
+      const isCanonicalUnit = (u) => {
+        const unit = normalizeUnit(u);
+        return unit === "g" || unit === "ml" || unit === "serving";
+      };
+
+      payload.items = items.map((it) => {
+        if (!it || typeof it !== "object") return it;
+
+        // Read UI quantity (support either legacy numeric fields or object form)
+        const uiQty = typeof it.quantity === "object" && it.quantity
+          ? (isFiniteNumber(it.quantity.value) ? it.quantity.value : null)
+          : (isFiniteNumber(it.quantity) ? it.quantity : null);
+
+        const uiUnit = typeof it.quantity === "object" && it.quantity
+          ? normalizeUnit(it.quantity.unit)
+          : normalizeUnit(it.quantityUnit || it.unit);
+
+        const uiIsEstimate = typeof it.quantity === "object" && it.quantity
+          ? (typeof it.quantity.isEstimate === "boolean" ? it.quantity.isEstimate : null)
+          : (typeof it.quantityIsEstimate === "boolean" ? it.quantityIsEstimate : null);
+
+        // Read normalized quantity (support either numeric flat fields or object form)
+        const nQty = typeof it.normalizedQuantity === "object" && it.normalizedQuantity
+          ? (isFiniteNumber(it.normalizedQuantity.value) ? it.normalizedQuantity.value : null)
+          : (isFiniteNumber(it.normalizedQuantity) ? it.normalizedQuantity : null);
+
+        const nUnit = typeof it.normalizedQuantity === "object" && it.normalizedQuantity
+          ? normalizeUnit(it.normalizedQuantity.unit)
+          : normalizeUnit(it.normalizedQuantityUnit || it.normalizedQuantity_unit);
+
+        const nIsEstimate = typeof it.normalizedQuantity === "object" && it.normalizedQuantity
+          ? (typeof it.normalizedQuantity.isEstimate === "boolean" ? it.normalizedQuantity.isEstimate : null)
+          : (typeof it.normalizedQuantityIsEstimate === "boolean" ? it.normalizedQuantityIsEstimate : null);
+
+        const nBasis = typeof it.normalizedQuantity === "object" && it.normalizedQuantity
+          ? (it.normalizedQuantity.basis != null ? String(it.normalizedQuantity.basis) : null)
+          : (it.normalizedQuantityBasis != null ? String(it.normalizedQuantityBasis) : null);
+
+        const nConf = typeof it.normalizedQuantity === "object" && it.normalizedQuantity
+          ? (isFiniteNumber(it.normalizedQuantity.confidence) ? it.normalizedQuantity.confidence : null)
+          : (isFiniteNumber(it.normalizedQuantityConfidence) ? it.normalizedQuantityConfidence : null);
+
+        // If the client gave us a canonical normalized quantity, use it for calculations.
+        if (nQty != null && nUnit && isCanonicalUnit(nUnit)) {
+          // Preserve UI quantity for display/audit.
+          it.uiQuantity = uiQty;
+          it.uiQuantityUnit = uiUnit || null;
+          if (uiIsEstimate != null) it.uiQuantityIsEstimate = uiIsEstimate;
+
+          // Force canonical quantity for downstream math.
+          it.quantity = nQty;
+          it.quantityUnit = normalizeUnit(nUnit);
+          if (nIsEstimate != null) it.quantityIsEstimate = nIsEstimate;
+          if (nBasis != null) it.quantityBasis = nBasis;
+          if (nConf != null) it.quantityConfidence = nConf;
+
+          // Also keep a structured normalizedQuantity object for persistence.
+          it.normalizedQuantity = {
+            value: nQty,
+            unit: normalizeUnit(nUnit),
+            isEstimate: nIsEstimate === true,
+            basis: nBasis || "gpt",
+            confidence: nConf != null ? nConf : 1,
+          };
+
+          // Mirror common legacy keys (flat) so older code can still read them.
+          it.normalizedQuantityUnit = normalizeUnit(nUnit);
+          it.normalizedQuantityIsEstimate = nIsEstimate === true;
+          if (nBasis != null) it.normalizedQuantityBasis = nBasis;
+          if (nConf != null) it.normalizedQuantityConfidence = nConf;
+        }
+
+        return it;
+      });
+
+      return payload;
+    }
+
+    normalizeMealItemsForNormalizedQuantity(payload);
+
+    // Debug: warn if a non-canonical UI unit is provided but we did not receive a canonical normalized fallback.
+    try {
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      const bad = items
+        .map((it) => {
+          const unit = String(it?.quantityUnit || it?.quantity?.unit || "").trim().toLowerCase();
+          const hasNorm = !!(it?.normalizedQuantity && (it.normalizedQuantity.value != null) && it.normalizedQuantity.unit);
+          const isCanonical = unit === "g" || unit === "ml" || unit === "serving";
+          return !isCanonical && unit && !hasNorm ? unit : null;
+        })
+        .filter(Boolean);
+      if (bad.length > 0) {
+        console.warn("[Users/Meals] Missing normalizedQuantity fallback for non-canonical units:", bad.slice(0, 10));
+      }
+    } catch {
+      // ignore
+    }
 
     // Debug: trace USDA-equivalent linkage coming from the client
     try {
@@ -2308,3 +2430,4 @@ process.on("SIGTERM", async () => {
     process.exit(0);
   }
 });
+
