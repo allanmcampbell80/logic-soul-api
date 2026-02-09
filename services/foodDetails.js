@@ -1,5 +1,6 @@
 // services/foodDetails.js
 import { ObjectId } from "mongodb";
+import { notIgnoredQuery, scoreCanadianDoc, normalizeNutrientsForClient } from "./utils.js";
 
 // --- OFF nutriments → normalized nutrients[] fallback ---
 
@@ -519,6 +520,219 @@ export async function getFoodDetails(db, ids) {
       healthProfile: doc.ingredient_profile_v1 || null,
     };
   });
+
+  return items;
+}
+
+// --- USDA equivalent linkage helpers (candidates to move into services/foods.js) ---
+// Helper: attach Mongo _id of the USDA branded equivalent (if linked) so clients can submit either.
+// Uses doc.usda_equivalent.food_id when present; otherwise does a one-time lookup by normalized UPC.
+export async function attachUSDAEquivalentFoodIdToDoc(db, doc) {
+  try {
+    if (!db || !doc || typeof doc !== "object") return doc;
+
+    const eq = doc.usda_equivalent;
+    if (!eq || typeof eq !== "object") return doc;
+
+    // Already have a stored Mongo id → nothing to do.
+    const existingFoodId = eq.food_id || eq.foodId || doc.usda_equivalent_food_id || doc.usdaEquivalentFoodId;
+    if (existingFoodId && ObjectId.isValid(String(existingFoodId))) {
+      const fid = String(existingFoodId);
+      // Normalize the outward-facing convenience alias fields.
+      doc.usda_equivalent_food_id = fid;
+      doc.usdaEquivalentFoodId = fid;
+      doc.usda_equivalent = { ...eq, food_id: fid, foodId: fid };
+      return doc;
+    }
+
+    const upcRaw = eq.normalized_upc || eq.normalizedUPC || "";
+    const normalizedUSDA = String(upcRaw).replace(/\D/g, "").padStart(16, "0");
+    if (!normalizedUSDA) return doc;
+
+    const foodsCol = db.collection(process.env.MONGODB_COLLECTION_FOODS);
+
+    const usdaDoc = await foodsCol.findOne(
+      {
+        ...notIgnoredQuery(),
+        "source.usda_data_type": "Branded",
+        $or: [{ normalized_upc: normalizedUSDA }, { normalized_upc_16: normalizedUSDA }],
+      },
+      { projection: { _id: 1 } }
+    );
+
+    if (!usdaDoc?._id) return doc;
+
+    const foodIdStr = String(usdaDoc._id);
+
+    // Attach to response
+    doc.usda_equivalent_food_id = foodIdStr;
+    doc.usdaEquivalentFoodId = foodIdStr;
+    doc.usda_equivalent = { ...eq, food_id: foodIdStr, foodId: foodIdStr };
+
+    // Best-effort: persist the discovered food_id back onto the Canadian doc so future calls avoid lookup.
+    // Only do this when the current doc is a Mongo doc (has _id) and looks valid.
+    if (doc._id && ObjectId.isValid(String(doc._id))) {
+      try {
+        await foodsCol.updateOne(
+          { _id: new ObjectId(String(doc._id)) },
+          { $set: { "usda_equivalent.food_id": new ObjectId(foodIdStr) } }
+        );
+      } catch (persistErr) {
+        console.error("[USDAEquivalent] Failed to persist usda_equivalent.food_id (best-effort):", persistErr);
+      }
+    }
+
+    return doc;
+  } catch (err) {
+    console.error("[USDAEquivalent] attachUSDAEquivalentFoodIdToDoc failed:", err);
+    return doc;
+  }
+}
+
+export async function attachUSDAEquivalentFoodIdToCandidates(db, result) {
+  try {
+    if (!db || !result || typeof result !== "object") return result;
+    const items = Array.isArray(result.items) ? result.items : [];
+    if (items.length === 0) return result;
+
+    // Only do lookups for candidates that actually need it.
+    for (const it of items) {
+      const cands = Array.isArray(it?.candidates) ? it.candidates : [];
+      for (const c of cands) {
+        if (!c || typeof c !== "object") continue;
+        if (!c.usda_equivalent || typeof c.usda_equivalent !== "object") continue;
+
+        const hasId =
+          (c.usda_equivalent.food_id || c.usda_equivalent.foodId || c.usda_equivalent_food_id || c.usdaEquivalentFoodId) != null;
+        if (hasId) {
+          // normalize outward alias
+          const fid = c.usda_equivalent.food_id || c.usda_equivalent.foodId || c.usda_equivalent_food_id || c.usdaEquivalentFoodId;
+          if (ObjectId.isValid(String(fid))) {
+            const fidStr = String(fid);
+            c.usda_equivalent_food_id = fidStr;
+            c.usdaEquivalentFoodId = fidStr;
+            c.usda_equivalent = { ...c.usda_equivalent, food_id: fidStr, foodId: fidStr };
+          }
+          continue;
+        }
+
+        await attachUSDAEquivalentFoodIdToDoc(db, c);
+      }
+    }
+
+    return result;
+  } catch (err) {
+    console.error("[MealSearch] Failed to attach usda_equivalent food_id:", err);
+    return result;
+  }
+}
+
+// --- Barcode lookup helpers (candidates to move into services/foods.js) ---
+export async function chooseBestCanadianDocForUPC(db, normalizedUPC16) {
+  if (!db) return null;
+  const collection = db.collection(process.env.MONGODB_COLLECTION_FOODS);
+
+  // Pull all candidate docs for this UPC (excluding USDA branded)
+  const docs = await collection
+    .find({
+      ...notIgnoredQuery(),
+      normalized_upc_16: normalizedUPC16,
+      $or: [
+        { "source.usda_data_type": { $exists: false } },
+        { "source.usda_data_type": { $ne: "Branded" } },
+      ],
+    })
+    .limit(25)
+    .toArray();
+
+  if (!docs || docs.length === 0) return null;
+
+  // Rank using score; tie-break by newest timestamp
+  docs.sort((a, b) => {
+    const sa = scoreCanadianDoc(a);
+    const sb = scoreCanadianDoc(b);
+    if (sb !== sa) return sb - sa;
+
+    const ta = Math.max(
+      a?.updatedAt ? new Date(a.updatedAt).getTime() : 0,
+      a?.createdAt ? new Date(a.createdAt).getTime() : 0
+    );
+    const tb = Math.max(
+      b?.updatedAt ? new Date(b.updatedAt).getTime() : 0,
+      b?.createdAt ? new Date(b.createdAt).getTime() : 0
+    );
+    return (tb || 0) - (ta || 0);
+  });
+
+  return docs[0];
+}
+
+// --- Barcode lookup helpers ---
+export async function fetchBestDocForBarcode(db, normalizedUPC16) {
+  if (!db) return null;
+  const collection = db.collection(process.env.MONGODB_COLLECTION_FOODS);
+
+  const normalized = String(normalizedUPC16 || "").replace(/\D/g, "").padStart(16, "0");
+  if (!normalized) return null;
+
+  // 1) Direct USDA branded match (gold standard for US products)
+  let doc = await collection.findOne({
+    ...notIgnoredQuery(),
+    "source.usda_data_type": "Branded",
+    $or: [{ normalized_upc: normalized }, { normalized_upc_16: normalized }],
+  });
+
+  if (!doc) {
+    // 2) Best Canadian doc
+    doc = await chooseBestCanadianDocForUPC(db, normalized);
+  }
+
+  if (!doc) {
+    // 3) Generic fallback
+    doc = await collection.findOne({
+      ...notIgnoredQuery(),
+      $or: [{ normalized_upc: normalized }, { normalized_upc_16: normalized }],
+    });
+  }
+
+  if (!doc) return null;
+
+  // Normalize nutrient keys for client compatibility
+  if (Array.isArray(doc.nutrients)) {
+    doc.nutrients = normalizeNutrientsForClient(doc.nutrients);
+  }
+
+  // Attach submit-ready USDA equivalent food_id when possible
+  doc = await attachUSDAEquivalentFoodIdToDoc(db, doc);
+
+  return doc;
+}
+
+export function makeBarcodeLockedCandidateFromDoc(doc, barcode16) {
+  if (!doc || typeof doc !== "object") return null;
+  const name = doc.display_product_name || doc.common_name || doc.name || "";
+  const brandName = (doc.brand && (doc.brand.name || doc.brand.owner)) || null;
+
+  return {
+    id: doc._id ? String(doc._id) : null,
+    name,
+    brandName,
+    normalizedUPC16: barcode16 || doc.normalized_upc_16 || doc.normalized_upc || null,
+    // Make it unmistakably dominant
+    score: 1_000_000,
+    _combinedScore: 1_000_000,
+    // Optional flags for clients / debugging
+    is_barcode_confirmed: true,
+    isBarcodeConfirmed: true,
+    barcode: barcode16 || null,
+    source: doc.source || null,
+    is_canadian_product: doc.is_canadian_product ?? null,
+    usda_equivalent: doc.usda_equivalent ?? null,
+    usda_equivalent_food_id: doc.usda_equivalent_food_id ?? doc.usdaEquivalentFoodId ?? null,
+    usdaEquivalentFoodId: doc.usdaEquivalentFoodId ?? doc.usda_equivalent_food_id ?? null,
+  };
+}
+
 
   return items;
 }
