@@ -3,8 +3,7 @@ import express from "express";
 import cors from "cors";
 import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import { notIgnoredQuery, safeTrimString, hasNonEmptyArray, isLikelyDvBoilerplate, scoreCanadianDoc, normalizeNutrientsForClient, 
-isBarcodeLockedParsedMealItem, normalizeBarcodeTo16, 
- } from "./services/utils.js";
+isBarcodeLockedParsedMealItem, normalizeBarcodeTo16, coerceUserIdValue } from "./services/utils.js";
 import { findBestMatchesForMealItems, enrichMealSearchResultWithUSDAEquivalent } from "./services/mealSearch.js";
 import { buildUserEnrichedDoc, ensureSimpleIngredientsFromParsedList} from "./services/enrich.js";
 import { deleteUserAndAllData, ensureUser, updateUserProfile, patchUserDailyTotals, storeUserEnergySamples, 
@@ -2430,4 +2429,3 @@ process.on("SIGTERM", async () => {
     process.exit(0);
   }
 });
-
