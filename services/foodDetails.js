@@ -524,6 +524,7 @@ export async function getFoodDetails(db, ids) {
   return items;
 }
 
+
 // --- USDA equivalent linkage helpers (candidates to move into services/foods.js) ---
 // Helper: attach Mongo _id of the USDA branded equivalent (if linked) so clients can submit either.
 // Uses doc.usda_equivalent.food_id when present; otherwise does a one-time lookup by normalized UPC.
@@ -731,8 +732,4 @@ export function makeBarcodeLockedCandidateFromDoc(doc, barcode16) {
     usda_equivalent_food_id: doc.usda_equivalent_food_id ?? doc.usdaEquivalentFoodId ?? null,
     usdaEquivalentFoodId: doc.usdaEquivalentFoodId ?? doc.usda_equivalent_food_id ?? null,
   };
-}
-
-
-  return items;
 }
