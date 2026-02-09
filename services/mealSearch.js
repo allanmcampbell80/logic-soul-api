@@ -1,6 +1,8 @@
 // mealSearch.js
 
 import { ObjectId } from "mongodb";
+import { notIgnoredQuery } from "./utils.js";
+import { attachUSDAEquivalentFoodIdToCandidates } from "./foodDetails.js";
 
 /**
  * Scoring heuristic:
@@ -983,4 +985,91 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
     mealType: parsedMeal.mealType,
     items: results
   };
+}
+
+// --- Meal-search enrichment helpers (candidates to move into services/mealSearch.js) ---
+// Helper: Ensure meal-search candidates include usda_equivalent (and optional source/is_canadian_product)
+// This prevents the client from missing the USDA toggle when the service layer uses projections/mappers.
+export async function enrichMealSearchResultWithUSDAEquivalent(db, result) {
+  try {
+    if (!db || !result || typeof result !== "object") return result;
+
+    const items = Array.isArray(result.items) ? result.items : [];
+    if (items.length === 0) return result;
+
+    // Collect unique candidate ids
+    const idSet = new Set();
+    for (const it of items) {
+      const cands = Array.isArray(it?.candidates) ? it.candidates : [];
+      for (const c of cands) {
+        const id = c?.id != null ? String(c.id).trim() : "";
+        if (id && ObjectId.isValid(id)) idSet.add(id);
+      }
+    }
+
+    const ids = Array.from(idSet);
+    if (ids.length === 0) return result;
+
+    const foodsCol = db.collection(process.env.MONGODB_COLLECTION_FOODS || "food_items");
+    const objectIds = ids.map((s) => new ObjectId(s));
+
+    const docs = await foodsCol
+      .find(
+        { ...notIgnoredQuery(), _id: { $in: objectIds } },
+        {
+          projection: {
+            _id: 1, // ADDED: include _id so we can persist usda_equivalent.food_id later
+            usda_equivalent: 1,
+            source: 1,
+            is_canadian_product: 1,
+            normalized_upc: 1,
+            normalized_upc_16: 1,
+          },
+        }
+      )
+      .toArray();
+
+    const byId = new Map(docs.map((d) => [String(d._id), d]));
+
+    // Mutate in place so downstream code keeps references
+    for (const it of items) {
+      const cands = Array.isArray(it?.candidates) ? it.candidates : [];
+      for (const c of cands) {
+        const id = c?.id != null ? String(c.id).trim() : "";
+        if (!id) continue;
+        const doc = byId.get(id);
+        if (!doc) continue;
+
+        // Only fill if missing so we don't overwrite service-provided fields
+        if (c.usda_equivalent == null && doc.usda_equivalent != null) {
+          c.usda_equivalent = doc.usda_equivalent;
+        }
+
+        // Optional: helpful flags for the client (safe to ignore)
+        if (c.source == null && doc.source != null) {
+          c.source = doc.source;
+        }
+        if (c.is_canadian_product == null && doc.is_canadian_product != null) {
+          c.is_canadian_product = doc.is_canadian_product;
+        }
+
+        // If the linked usda_equivalent already stores a Mongo food_id, surface it for the client.
+        const storedEqFoodId = doc?.usda_equivalent?.food_id;
+        if (storedEqFoodId && ObjectId.isValid(String(storedEqFoodId))) {
+          const fidStr = String(storedEqFoodId);
+          c.usda_equivalent_food_id = fidStr;
+          c.usdaEquivalentFoodId = fidStr;
+          c.usda_equivalent = { ...c.usda_equivalent, food_id: fidStr, foodId: fidStr };
+        }
+      }
+    }
+
+    // Second pass: if the client needs a submit-ready USDA Mongo id and it wasn't stored, do a one-time lookup.
+    result = await attachUSDAEquivalentFoodIdToCandidates(db, result);
+
+    return result;
+  } catch (err) {
+    console.error("[MealSearch] Failed to enrich candidates with usda_equivalent:", err);
+    return result;
+  }
 }
