@@ -262,7 +262,8 @@ async function prefetchFavoriteCandidates({
   finalWords,
   brandTokens,
   isFast,
-  candidatesById
+  candidatesById,
+  requireSimpleIngredient
 }) {
   if (!favoriteFoodIds || favoriteFoodIds.length === 0) return;
 
@@ -282,12 +283,26 @@ async function prefetchFavoriteCandidates({
     const candidateId = String(doc._id);
     const candidateHaystack = buildCandidateHaystack(doc);
 
-    // Only prefetch favorites that actually match the current item tokens.
-    // Prevents unrelated favorites (e.g., protein bars) from showing up for "coffee".
-    const hasTokenMatch = (finalWords || []).some(
-      (w) => w && candidateHaystack.includes(String(w).toLowerCase())
-    );
-    if (!hasTokenMatch) continue;
+    // If the parser is treating this as a simple ingredient, do NOT allow packaged-product
+    // favorites to override it. This prevents cases like "whole milk" -> protein bar.
+    if (requireSimpleIngredient) {
+      const isSimple = Boolean(doc.is_simple_ingredient || doc.is_single_ingredient);
+      if (!isSimple) continue;
+    }
+
+    // Only prefetch favorites that strongly match the current item tokens.
+    // Using `.some()` is too permissive (e.g., many products include "milk" in ingredients).
+    const words = Array.isArray(finalWords) ? finalWords.map((w) => String(w || "").toLowerCase()) : [];
+    let hitCount = 0;
+    for (const w of words) {
+      if (!w) continue;
+      if (candidateHaystack.includes(w)) hitCount += 1;
+    }
+
+    // Require a minimum number of hits. For multi-word queries, require at least 2 hits;
+    // for single-word queries, require that single word.
+    const minHits = words.length >= 2 ? 2 : 1;
+    if (hitCount < minHits) continue;
 
     // If the user specified brand/chain tokens, only consider favorites that match them.
     // This prevents favorites from overriding explicit chains like "mcdonalds".
@@ -836,7 +851,8 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
       finalWords,
       brandTokens,
       isFast,
-      candidatesById
+      candidatesById,
+      requireSimpleIngredient
     });
 
     // If favorites already give us enough strong candidates in fast mode, we can stop early.
