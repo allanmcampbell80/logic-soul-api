@@ -191,6 +191,39 @@ function buildCandidateHaystack(candidate) {
     .toLowerCase();
 }
 
+function buildCandidateHaystackHighSignal(candidate) {
+  // A tighter haystack used for ingredient-ish queries so we don't match only via ingredients_text.
+  // This prevents vague tokens like "milk" from pulling in unrelated packaged favorites whose
+  // ingredient lists contain the word.
+  return [
+    candidate.normalized_name,
+    candidate.name,
+    candidate.common_name,
+    candidate.normalized_common_name,
+    candidate.display_product_name,
+    // enriched v2
+    candidate.names_enrichment_v2 && candidate.names_enrichment_v2.brand_name,
+    candidate.names_enrichment_v2 && candidate.names_enrichment_v2.product_name,
+    candidate.names_enrichment_v2 && candidate.names_enrichment_v2.common_name,
+    // arrays
+    Array.isArray(candidate.alt_names) ? candidate.alt_names.join(" ") : "",
+    Array.isArray(candidate.normalized_alt_names) ? candidate.normalized_alt_names.join(" ") : "",
+    candidate.names_enrichment_v2 && Array.isArray(candidate.names_enrichment_v2.alt_names)
+      ? candidate.names_enrichment_v2.alt_names.join(" ")
+      : "",
+    // brand
+    (candidate.brand && candidate.brand.name) || "",
+    (candidate.brand && candidate.brand.owner) || "",
+    // restaurant / prep context
+    candidate.preparation_context,
+    candidate.is_restaurant_item ? "restaurant" : "",
+    candidate.restaurant_chain || ""
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
 function brandTokensFromParsedItem(item) {
   // If canonicalName is "coffee" but originalPhrase is "mcdonalds coffee",
   // treat the extra token(s) as brand/context tokens.
@@ -293,6 +326,10 @@ async function prefetchFavoriteCandidates({
     const candidateId = String(doc._id);
     const candidateHaystack = buildCandidateHaystack(doc);
 
+    // For ingredient-ish queries, require token relevance against a higher-signal haystack
+    // (name/common/alt/brand), not just ingredients_text.
+    const tokenHaystack = requireSimpleIngredient ? buildCandidateHaystackHighSignal(doc) : candidateHaystack;
+
     // If the parser is treating this as a simple ingredient, do NOT allow packaged-product
     // favorites to override it. This prevents cases like "whole milk" -> protein bar.
     if (requireSimpleIngredient) {
@@ -306,7 +343,7 @@ async function prefetchFavoriteCandidates({
     let hitCount = 0;
     for (const w of words) {
       if (!w) continue;
-      if (candidateHaystack.includes(w)) hitCount += 1;
+      if (tokenHaystack.includes(w)) hitCount += 1;
     }
 
     // Require a minimum number of hits. For multi-word queries, require at least 2 hits;
@@ -320,7 +357,7 @@ async function prefetchFavoriteCandidates({
       let matched = 0;
       for (const t of brandTokens) {
         if (!t) continue;
-        if (candidateHaystack.includes(t)) matched += 1;
+        if (tokenHaystack.includes(t)) matched += 1;
       }
       if (matched === 0) continue;
     }
