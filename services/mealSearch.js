@@ -254,6 +254,16 @@ function buildFavoriteMetaFromDocs(favoriteDocs) {
   return meta;
 }
 
+function buildFavoriteRankMap(favoriteMeta) {
+  // Rank favorites by recency (most recent = rank 1). Used only for UI.
+  const entries = Object.entries(favoriteMeta || {}).filter(([id, ts]) => id && Number.isFinite(ts));
+  entries.sort((a, b) => (b[1] || 0) - (a[1] || 0));
+
+  const rank = {};
+  for (let i = 0; i < entries.length; i++) rank[entries[i][0]] = i + 1;
+  return rank;
+}
+
 async function prefetchFavoriteCandidates({
   foodItems,
   favoriteFoodIds,
@@ -412,6 +422,7 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
   const favoriteFoodIds = Array.isArray(options.favoriteFoodIds) ? options.favoriteFoodIds : [];
   const favoriteIdSet = new Set(favoriteFoodIds.map((x) => String(x)));
   const favoriteMeta = options.favoriteMeta || buildFavoriteMetaFromDocs(options.favoriteDocs || []);
+  const favoriteRankById = buildFavoriteRankMap(favoriteMeta);
   // favoriteMeta shape: { [foodIdString]: addedAtTimestamp }
 
   // mode:
@@ -904,6 +915,9 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
           restaurant_chain: c.doc.restaurant_chain || null,
           brand: c.doc.brand || null,
           food_type: c.doc.food_type || null,
+          is_favorite: favoriteIdSet.has(String(c.doc._id)),
+          favorite_rank: favoriteRankById[String(c.doc._id)] || 0,
+          favorite_added_at: favoriteMeta[String(c.doc._id)] ? new Date(favoriteMeta[String(c.doc._id)]).toISOString() : null,
           label: c.label,
           score: c.score
         }))
@@ -990,6 +1004,9 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
         restaurant_chain: c.doc.restaurant_chain || null,
         brand: c.doc.brand || null,
         food_type: c.doc.food_type || null,
+        is_favorite: favoriteIdSet.has(String(c.doc._id)),
+        favorite_rank: favoriteRankById[String(c.doc._id)] || 0,
+        favorite_added_at: favoriteMeta[String(c.doc._id)] ? new Date(favoriteMeta[String(c.doc._id)]).toISOString() : null,
         label: c.label,
         score: c.score
       }))
