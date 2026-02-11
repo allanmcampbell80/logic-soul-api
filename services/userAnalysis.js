@@ -522,3 +522,161 @@ export async function runCorrelationEngineForUser(db, options) {
     dateKey: endDateKey,
   };
 }
+
+// ------------------------------------------------------------
+// Promotion layer (v1)
+// Goal: after each engine run, update a rolling tally and surface stable findings early.
+// Stores user-facing correlations in `user_correlations`.
+// ------------------------------------------------------------
+
+const USER_CORRELATIONS_COLLECTION = "user_correlations";
+
+function passesV1Threshold(c) {
+  // Early surfacing rules (tunable)
+  const mode = typeof c.mode === "string" ? c.mode : "";
+  const strength = typeof c.strength === "number" ? c.strength : Number(c.strength);
+  if (!Number.isFinite(strength)) return false;
+
+  // Require some minimum support metadata when present
+  const n = Number.isFinite(Number(c.n)) ? Number(c.n) : null;
+  if (n !== null && n < 8) return false;
+
+  if (mode === "continuous_spearman") {
+    return Math.abs(strength) >= 0.35; // moderate+
+  }
+
+  // event_low / event_high effect sizes (Cohen-ish d)
+  return Math.abs(strength) >= 0.8;
+}
+
+function buildCorrelationKey(c, lagDaysFallback = 1) {
+  const inputKey = typeof c.inputKey === "string" ? c.inputKey.trim() : "";
+  const outputKey = typeof c.outputKey === "string" ? c.outputKey.trim() : "";
+  const mode = typeof c.mode === "string" && c.mode.trim() ? c.mode.trim() : "unknown";
+  const lagDays = Number.isFinite(Number(c.lagDays)) ? Math.trunc(Number(c.lagDays)) : lagDaysFallback;
+  return { inputKey, outputKey, mode, lagDays };
+}
+
+export async function promoteCorrelationCandidates(db, payload) {
+  const { userId, dateKey, candidates, lagDays } = payload || {};
+
+  if (!userId || typeof userId !== "string") {
+    throw new Error("userId is required");
+  }
+
+  let userObjectId;
+  try {
+    userObjectId = new ObjectId(userId);
+  } catch {
+    throw new Error("userId must be a valid ObjectId string");
+  }
+
+  if (!dateKey || typeof dateKey !== "string") {
+    throw new Error("dateKey is required");
+  }
+
+  if (!Array.isArray(candidates)) {
+    throw new Error("candidates must be an array");
+  }
+
+  const col = db.collection(USER_CORRELATIONS_COLLECTION);
+  const now = new Date();
+
+  // Only consider candidates that pass minimal schema sanity.
+  const normalized = candidates.map((c) => normalizeCandidate(c)).filter(Boolean);
+
+  let newlySurfacedCount = 0;
+
+  for (const c of normalized) {
+    const { inputKey, outputKey, mode, lagDays: lag } = buildCorrelationKey(c, lagDays);
+    if (!inputKey || !outputKey) continue;
+
+    const keyFilter = {
+      userId: userObjectId,
+      inputKey,
+      outputKey,
+      mode,
+      lagDays: lag,
+    };
+
+    const isStrongNow = passesV1Threshold(c);
+
+    // We track:
+    // - seenCount: how many engine runs this candidate appeared in
+    // - confirmStreak: consecutive runs meeting strength threshold
+    // - isSurfaced: whether we show it to the user
+    // Promotion rule (v1): seenCount >= 5 AND confirmStreak >= 2
+
+    const update = {
+      $set: {
+        updatedAt: now,
+        lastSeenDateKey: dateKey,
+        direction: c.direction,
+        strength: c.strength,
+        // optional metadata (kept fresh)
+        ...(Number.isFinite(Number(c.n)) ? { n: Math.trunc(Number(c.n)) } : {}),
+        ...(Number.isFinite(Number(c.nEvent)) ? { nEvent: Math.trunc(Number(c.nEvent)) } : {}),
+        ...(Number.isFinite(Number(c.nNonEvent)) ? { nNonEvent: Math.trunc(Number(c.nNonEvent)) } : {}),
+        ...(Number.isFinite(Number(c.meanEvent)) ? { meanEvent: Number(c.meanEvent) } : {}),
+        ...(Number.isFinite(Number(c.meanNonEvent)) ? { meanNonEvent: Number(c.meanNonEvent) } : {}),
+        ...(Number.isFinite(Number(c.threshold)) ? { threshold: Number(c.threshold) } : {}),
+        ...(Number.isFinite(Number(c.delta)) ? { delta: Number(c.delta) } : {}),
+      },
+      $setOnInsert: {
+        createdAt: now,
+        firstSeenDateKey: dateKey,
+        seenCount: 0,
+        confirmStreak: 0,
+        isSurfaced: false,
+      },
+      $inc: {
+        seenCount: 1,
+      },
+    };
+
+    // Two-step: apply base update, then compute streak/surface based on stored doc.
+    await col.updateOne(keyFilter, update, { upsert: true });
+
+    const doc = await col.findOne(keyFilter, { projection: { seenCount: 1, confirmStreak: 1, isSurfaced: 1 } });
+    const seenCount = Number.isFinite(Number(doc?.seenCount)) ? Number(doc.seenCount) : 1;
+    const confirmStreakPrev = Number.isFinite(Number(doc?.confirmStreak)) ? Number(doc.confirmStreak) : 0;
+    const isSurfacedPrev = doc?.isSurfaced === true;
+
+    const confirmStreak = isStrongNow ? confirmStreakPrev + 1 : 0;
+
+    const shouldSurface = !isSurfacedPrev && seenCount >= 5 && confirmStreak >= 2;
+
+    const patch = {
+      $set: {
+        confirmStreak,
+        ...(shouldSurface ? { isSurfaced: true, surfacedAt: now, surfacedDateKey: dateKey } : {}),
+      },
+    };
+
+    await col.updateOne(keyFilter, patch);
+
+    if (shouldSurface) newlySurfacedCount += 1;
+  }
+
+  return { newlySurfacedCount, processedCount: normalized.length };
+}
+
+// Convenience wrapper: run the engine and immediately promote candidates.
+export async function runCorrelationEngineAndPromoteForUser(db, options) {
+  const result = await runCorrelationEngineForUser(db, options);
+
+  // If there are no candidates (or not enough days), nothing to promote.
+  const candidates = Array.isArray(result?.top) ? result.top : [];
+  if (!candidates.length) {
+    return { ...result, promotedCount: 0 };
+  }
+
+  const promoted = await promoteCorrelationCandidates(db, {
+    userId: String(options?.userId || "").trim(),
+    dateKey: result.dateKey,
+    candidates,
+    lagDays: result.lagDays,
+  });
+
+  return { ...result, promotedCount: promoted?.newlySurfacedCount ?? 0 };
+}
