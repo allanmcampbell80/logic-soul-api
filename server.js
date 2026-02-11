@@ -13,7 +13,7 @@ import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, delete
 import { getFoodDetails, attachUSDAEquivalentFoodIdToCandidates, attachUSDAEquivalentFoodIdToDoc, chooseBestCanadianDocForUPC, 
 fetchBestDocForBarcode, makeBarcodeLockedCandidateFromDoc,  } from "./services/foodDetails.js";
 import { getUserFavoritesByUserId, addUserFavoriteByUserId, deleteUserFavoriteByUserId,} from "./services/favorites.js";
-import { storeUserCorrelationPack, runCorrelationEngineForUser } from "./services/userAnalysis.js";
+import { storeUserCorrelationPack, runCorrelationEngineForUser, runCorrelationEngineAndPromoteForUser } from "./services/userAnalysis.js";
 import { getAwardsForUser, applyAwardEvent } from "./services/awards.js";
 
 const app = express();
@@ -1141,6 +1141,24 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
 
     const result = await patchUserDailyTotals(db, userId, dateKeyResolved, patch, tzCheckin);
 
+    // User Analysis: after each check-in update, run correlation engine + promotion (best-effort).
+    // This surfaces stable insights as early as they arrive.
+    try {
+      if (db && result?.ok) {
+        runCorrelationEngineAndPromoteForUser(db, {
+          userId: String(userId),
+          windowDays: 120,
+          lagDays: 1,
+          minSupportDays: 4,
+          topK: 150,
+        }).catch((uaErr) => {
+          console.error("[UserAnalysis/AutoRunAfterCheckIn] Failed (best-effort):", uaErr);
+        });
+      }
+    } catch (uaOuterErr) {
+      console.error("[UserAnalysis/AutoRunAfterCheckIn] Unexpected error (best-effort):", uaOuterErr);
+    }
+
     // Energy: whenever we patch a check-in, also snapshot the running energy average for that date.
     // Best-effort: do not fail the check-in if snapshotting fails.
     try {
@@ -1290,6 +1308,116 @@ app.post("/users/:id/daily-totals/energy-samples", async (req, res) => {
 //-------------------------------------------------------------------------------------------------------
 // User Analysis
 
+// GET /users/:id/correlations
+// Returns user-facing (surfaced) correlations from `user_correlations`.
+// Query params:
+//   - surfacedOnly (default "true"): when true, only returns isSurfaced=true
+//   - limit (default 50, max 200)
+//   - includeAll (default "false"): when true, returns all correlations (surfaced + unsurfaced)
+app.get("/users/:id/correlations", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const userIdRaw = String(req.params?.id || "").trim();
+    if (!userIdRaw || !ObjectId.isValid(userIdRaw)) {
+      return res.status(400).json({ ok: false, error: "Missing or invalid ':id' (userId)." });
+    }
+
+    const userIdValue = coerceUserIdValue(userIdRaw);
+
+    const surfacedOnlyParam = String(req.query?.surfacedOnly ?? "true").trim().toLowerCase();
+    const includeAllParam = String(req.query?.includeAll ?? "false").trim().toLowerCase();
+
+    const includeAll = includeAllParam === "true" || includeAllParam === "1";
+    const surfacedOnly = includeAll ? false : !(surfacedOnlyParam === "false" || surfacedOnlyParam === "0");
+
+    const limitRaw = req.query?.limit;
+    const limit =
+      typeof limitRaw === "string" && /^[0-9]+$/.test(limitRaw)
+        ? Math.min(Math.max(parseInt(limitRaw, 10), 1), 200)
+        : 50;
+
+    const col = db.collection("user_correlations");
+
+    // user_correlations.userId is stored as ObjectId in the promotion layer.
+    // For safety, we query both ObjectId + string representations.
+    const userIdFilters = [{ userId: userIdValue }];
+    const userIdStr = String(userIdRaw);
+    if (userIdStr && userIdStr !== String(userIdValue)) {
+      userIdFilters.push({ userId: userIdStr });
+    }
+
+    const filter = {
+      $and: [
+        { $or: userIdFilters },
+        ...(surfacedOnly ? [{ isSurfaced: true }] : []),
+      ],
+    };
+
+    // Return newest surfaced first; tie-break by absolute strength.
+    // NOTE: abs sort is done in JS (Mongo sort can't do abs without pipeline).
+    const docs = await col
+      .find(filter, {
+        projection: {
+          userId: 1,
+          inputKey: 1,
+          outputKey: 1,
+          mode: 1,
+          lagDays: 1,
+          direction: 1,
+          strength: 1,
+          n: 1,
+          nEvent: 1,
+          nNonEvent: 1,
+          meanEvent: 1,
+          meanNonEvent: 1,
+          threshold: 1,
+          delta: 1,
+          seenCount: 1,
+          confirmStreak: 1,
+          isSurfaced: 1,
+          surfacedAt: 1,
+          surfacedDateKey: 1,
+          firstSeenDateKey: 1,
+          lastSeenDateKey: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      })
+      .sort({ surfacedAt: -1, updatedAt: -1 })
+      .limit(limit)
+      .toArray();
+
+    const items = (docs || []).map((d) => {
+      const out = { ...d };
+      // Normalize ObjectId for clients
+      if (out && out._id) out.id = String(out._id);
+      if (out && out.userId && typeof out.userId === "object") out.userId = String(out.userId);
+      delete out._id;
+      return out;
+    });
+
+    // Secondary sort by abs(strength) while preserving surfacedAt recency bias.
+    items.sort((a, b) => {
+      const aSurf = a?.surfacedAt ? new Date(a.surfacedAt).getTime() : 0;
+      const bSurf = b?.surfacedAt ? new Date(b.surfacedAt).getTime() : 0;
+      if (bSurf !== aSurf) return bSurf - aSurf;
+      const aAbs = Math.abs(typeof a?.strength === "number" ? a.strength : Number(a?.strength) || 0);
+      const bAbs = Math.abs(typeof b?.strength === "number" ? b.strength : Number(b?.strength) || 0);
+      return bAbs - aAbs;
+    });
+
+    return res.json({ ok: true, userId: userIdRaw, count: items.length, items });
+  } catch (err) {
+    console.error("[Users/Correlations/List] Error:", err);
+    return res.status(500).json({ ok: false, error: err?.message || "Failed to fetch correlations" });
+  }
+});
+
+//----------------------------------------------------------------------------------------------------------------------------
+
 // POST /user-analysis/correlation-pack
 // Receives app-generated daily correlation candidates for later longitudinal analysis
 app.post("/user-analysis/correlation-pack", async (req, res) => {
@@ -1353,7 +1481,7 @@ app.post("/user-analysis/run-correlation-engine", async (req, res) => {
         ? Math.trunc(topKRaw)
         : 150;
 
-    const result = await runCorrelationEngineForUser(db, {
+    const result = await runCorrelationEngineAndPromoteForUser(db, {
       userId,
       windowDays,
       lagDays: 1,
