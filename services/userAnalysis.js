@@ -13,7 +13,7 @@ import { ObjectId } from "mongodb";
 const COLLECTION = "user_analysis_correlation_packs";
 
 export async function storeUserCorrelationPack(db, payload) {
-  const { userId, dateKey, algorithmVersion, candidates } = payload || {};
+  const { userId, dateKey, algorithmVersion, candidates, windowDays, lagDays } = payload || {};
 
   // --- Basic validation ---
   if (!userId || typeof userId !== "string") {
@@ -58,6 +58,9 @@ export async function storeUserCorrelationPack(db, payload) {
     algorithmVersion,
     candidates: normalizedCandidates,
     storedCount: normalizedCandidates.length,
+    // Optional engine metadata (useful for server-side correlation engine packs)
+    ...(Number.isFinite(windowDays) ? { windowDays: Math.trunc(windowDays) } : {}),
+    ...(Number.isFinite(lagDays) ? { lagDays: Math.trunc(lagDays) } : {}),
     updatedAt: now,
   };
 
@@ -86,30 +89,41 @@ function normalizeCandidate(c) {
 
   const inputKey = typeof c.inputKey === "string" ? c.inputKey.trim() : "";
   const outputKey = typeof c.outputKey === "string" ? c.outputKey.trim() : "";
-  const directionRaw = typeof c.direction === "string" ? c.direction.trim().toLowerCase() : "";
 
-  // Only allow known directions
+  const directionRaw = typeof c.direction === "string" ? c.direction.trim().toLowerCase() : "";
   const direction = directionRaw === "positive" || directionRaw === "negative" ? directionRaw : null;
 
-  // Strength should be 0..1 (heuristic)
+  // Strength may be any finite number (e.g., Spearman rho -1..1, Cohen's d can exceed 1)
   const strengthNum = typeof c.strength === "number" ? c.strength : Number(c.strength);
-  const strength = Number.isFinite(strengthNum) ? clamp(strengthNum, 0, 1) : null;
+  const strength = Number.isFinite(strengthNum) ? strengthNum : null;
 
-  if (!inputKey || !outputKey || !direction || strength === null) {
+  // Strength is required. Direction is optional (we can infer it).
+  if (!inputKey || !outputKey || strength === null) {
     return null;
   }
 
-  return {
+  const base = {
     inputKey,
     outputKey,
-    direction,
+    direction: direction || (strength >= 0 ? "positive" : "negative"),
     strength,
   };
+
+  // Preserve useful optional fields from the server-side correlation engine.
+  const extras = {};
+  if (typeof c.mode === "string" && c.mode.trim()) extras.mode = c.mode.trim();
+  if (Number.isFinite(Number(c.lagDays))) extras.lagDays = Math.trunc(Number(c.lagDays));
+  if (Number.isFinite(Number(c.n))) extras.n = Math.trunc(Number(c.n));
+  if (Number.isFinite(Number(c.nEvent))) extras.nEvent = Math.trunc(Number(c.nEvent));
+  if (Number.isFinite(Number(c.nNonEvent))) extras.nNonEvent = Math.trunc(Number(c.nNonEvent));
+  if (Number.isFinite(Number(c.meanEvent))) extras.meanEvent = Number(c.meanEvent);
+  if (Number.isFinite(Number(c.meanNonEvent))) extras.meanNonEvent = Number(c.meanNonEvent);
+  if (Number.isFinite(Number(c.threshold))) extras.threshold = Number(c.threshold);
+  if (Number.isFinite(Number(c.delta))) extras.delta = Number(c.delta);
+
+  return { ...base, ...extras };
 }
 
-function clamp(v, min, max) {
-  return Math.max(min, Math.min(max, v));
-}
 
 // ------------------------------------------------------------
 // Longitudinal Correlation Engine (v1)
