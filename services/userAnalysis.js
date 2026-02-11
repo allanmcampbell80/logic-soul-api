@@ -1,4 +1,4 @@
-
+// userAnalysis.js
 
 import { ObjectId } from "mongodb";
 
@@ -109,4 +109,402 @@ function normalizeCandidate(c) {
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
+}
+
+// ------------------------------------------------------------
+// Longitudinal Correlation Engine (v1)
+// Goal: find lag-1 (next-day) correlations with minimal assumptions.
+// ------------------------------------------------------------
+
+function isFiniteNumber(v) {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function percentile(sortedNums, p) {
+  if (!Array.isArray(sortedNums) || sortedNums.length === 0) return null;
+  const pp = clamp(p, 0, 1);
+  const idx = (sortedNums.length - 1) * pp;
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return sortedNums[lo];
+  const w = idx - lo;
+  return sortedNums[lo] * (1 - w) + sortedNums[hi] * w;
+}
+
+function mean(nums) {
+  if (!Array.isArray(nums) || nums.length === 0) return null;
+  let s = 0;
+  for (const n of nums) s += n;
+  return s / nums.length;
+}
+
+function stdev(nums) {
+  if (!Array.isArray(nums) || nums.length < 2) return null;
+  const m = mean(nums);
+  let s2 = 0;
+  for (const n of nums) {
+    const d = n - m;
+    s2 += d * d;
+  }
+  return Math.sqrt(s2 / (nums.length - 1));
+}
+
+function rankArray(values) {
+  // Average ranks for ties.
+  const indexed = values.map((v, i) => ({ v, i }));
+  indexed.sort((a, b) => (a.v < b.v ? -1 : a.v > b.v ? 1 : 0));
+
+  const ranks = new Array(values.length);
+  let i = 0;
+  while (i < indexed.length) {
+    let j = i;
+    while (j + 1 < indexed.length && indexed[j + 1].v === indexed[i].v) j++;
+    const avgRank = (i + j + 2) / 2; // ranks are 1-based
+    for (let k = i; k <= j; k++) {
+      ranks[indexed[k].i] = avgRank;
+    }
+    i = j + 1;
+  }
+  return ranks;
+}
+
+function pearson(x, y) {
+  if (!Array.isArray(x) || !Array.isArray(y) || x.length !== y.length || x.length < 3) return null;
+  const mx = mean(x);
+  const my = mean(y);
+  let num = 0;
+  let dx2 = 0;
+  let dy2 = 0;
+  for (let i = 0; i < x.length; i++) {
+    const dx = x[i] - mx;
+    const dy = y[i] - my;
+    num += dx * dy;
+    dx2 += dx * dx;
+    dy2 += dy * dy;
+  }
+  if (dx2 <= 0 || dy2 <= 0) return null;
+  return num / Math.sqrt(dx2 * dy2);
+}
+
+function spearman(x, y) {
+  if (!Array.isArray(x) || !Array.isArray(y) || x.length !== y.length || x.length < 3) return null;
+  const rx = rankArray(x);
+  const ry = rankArray(y);
+  return pearson(rx, ry);
+}
+
+function normalizeIngredientKey(raw) {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[“”]/g, '"')
+    .replace(/[’]/g, "'");
+}
+
+function buildUserIdFilters(userId) {
+  const filters = [{ userId: String(userId) }];
+  if (ObjectId.isValid(String(userId))) {
+    try {
+      filters.push({ userId: new ObjectId(String(userId)) });
+    } catch {
+      // ignore
+    }
+  }
+  return filters;
+}
+
+function isOutcomeKey(k) {
+  return (
+    k === "checkin_mood" ||
+    k === "checkin_clarity_score" ||
+    k === "checkin_pain_peak" ||
+    k === "checkin_pain_region_count" ||
+    k === "checkin_energy"
+  );
+}
+
+function isInputKey(k) {
+  if (!k || typeof k !== "string") return false;
+  if (isOutcomeKey(k)) return false;
+  return true;
+}
+
+function extractDayInputs(dayDoc) {
+  const x = {};
+  const totals = dayDoc && typeof dayDoc.totals === "object" ? dayDoc.totals : {};
+
+  // Numeric totals → inputs (exclude outcomes)
+  for (const [k, v] of Object.entries(totals)) {
+    if (!isInputKey(k)) continue;
+    if (isFiniteNumber(v)) x[k] = v;
+  }
+
+  // Ingredients exposure → sparse inputs (counts)
+  const ing = dayDoc && typeof dayDoc.ingredients_exposure === "object" ? dayDoc.ingredients_exposure : null;
+  if (ing) {
+    for (const [rawKey, rawVal] of Object.entries(ing)) {
+      const key = normalizeIngredientKey(rawKey);
+      if (!key) continue;
+      const val = isFiniteNumber(rawVal) ? rawVal : null;
+      if (val == null) continue;
+      x[`ing:${key}`] = val;
+    }
+  }
+
+  return x;
+}
+
+function extractDayOutcomes(dayDoc) {
+  const totals = dayDoc && typeof dayDoc.totals === "object" ? dayDoc.totals : {};
+  const y = {};
+  for (const k of ["checkin_mood", "checkin_clarity_score", "checkin_pain_peak", "checkin_pain_region_count", "checkin_energy"]) {
+    const v = totals[k];
+    if (isFiniteNumber(v)) y[k] = v;
+  }
+  return y;
+}
+
+function buildAlignedLagPairs(docsSorted, lagDays) {
+  const pairs = [];
+  const lag = Math.max(1, Math.trunc(lagDays || 1));
+  for (let i = 0; i + lag < docsSorted.length; i++) {
+    const dX = docsSorted[i];
+    const dY = docsSorted[i + lag];
+    const x = extractDayInputs(dX);
+    const y = extractDayOutcomes(dY);
+    if (!x || Object.keys(x).length === 0) continue;
+    if (!y || Object.keys(y).length === 0) continue;
+    pairs.push({ x, y, dateKeyX: dX.dateKey, dateKeyY: dY.dateKey });
+  }
+  return pairs;
+}
+
+function computeSupportCounts(pairs) {
+  const counts = new Map();
+  for (const p of pairs) {
+    for (const [k, v] of Object.entries(p.x || {})) {
+      if (!isFiniteNumber(v)) continue;
+      counts.set(k, (counts.get(k) || 0) + 1);
+    }
+  }
+  return counts;
+}
+
+function topByAbsStrength(list, topK) {
+  const k = Math.max(10, Math.trunc(topK || 150));
+  list.sort((a, b) => Math.abs(b.strength || 0) - Math.abs(a.strength || 0));
+  return list.length > k ? list.slice(0, k) : list;
+}
+
+function buildExtremeEvents(values, lowP = 0.2, highP = 0.8) {
+  const clean = values.filter((v) => isFiniteNumber(v)).slice().sort((a, b) => a - b);
+  if (clean.length < 10) return { low: null, high: null };
+  const low = percentile(clean, lowP);
+  const high = percentile(clean, highP);
+  return { low, high };
+}
+
+function computeEventEffect(featureVals, eventFlags) {
+  const a = [];
+  const b = [];
+  for (let i = 0; i < featureVals.length; i++) {
+    const fv = featureVals[i];
+    const flag = eventFlags[i];
+    if (!isFiniteNumber(fv)) continue;
+    if (flag === true) a.push(fv);
+    else if (flag === false) b.push(fv);
+  }
+  if (a.length < 3 || b.length < 5) return null;
+
+  const ma = mean(a);
+  const mb = mean(b);
+  const all = a.concat(b);
+  const sd = stdev(all) || 0;
+  const delta = ma - mb;
+  const d = sd > 0 ? delta / sd : delta;
+
+  return { nEvent: a.length, nNonEvent: b.length, meanEvent: ma, meanNonEvent: mb, strength: d, delta };
+}
+
+// Main engine entry
+export async function runCorrelationEngineForUser(db, options) {
+  const userId = String(options?.userId || "").trim();
+  if (!userId) throw new Error("Missing userId");
+
+  const windowDays =
+    typeof options?.windowDays === "number" && Number.isFinite(options.windowDays) ? Math.trunc(options.windowDays) : 120;
+  const lagDays =
+    typeof options?.lagDays === "number" && Number.isFinite(options.lagDays) ? Math.trunc(options.lagDays) : 1;
+  const minSupportDays =
+    typeof options?.minSupportDays === "number" && Number.isFinite(options.minSupportDays) ? Math.trunc(options.minSupportDays) : 4;
+  const topK =
+    typeof options?.topK === "number" && Number.isFinite(options.topK) ? Math.trunc(options.topK) : 150;
+
+  const totalsCol = db.collection("user_daily_totals");
+  const userIdFilters = buildUserIdFilters(userId);
+
+  // Pull recent docs, sorted by dateKey, then slice last windowDays+lagDays+buffer
+  const allDocs = await totalsCol
+    .find(
+      { $or: userIdFilters },
+      { projection: { userId: 1, dateKey: 1, totals: 1, ingredients_exposure: 1, updatedAt: 1, createdAt: 1 } }
+    )
+    .sort({ dateKey: 1 })
+    .toArray();
+
+  const cleanDocs = (allDocs || []).filter((d) => typeof d?.dateKey === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d.dateKey));
+  const want = Math.min(Math.max(windowDays + lagDays + 10, 30), 450);
+  const sliced = cleanDocs.length > want ? cleanDocs.slice(cleanDocs.length - want) : cleanDocs;
+
+  sliced.sort((a, b) => (a.dateKey < b.dateKey ? -1 : a.dateKey > b.dateKey ? 1 : 0));
+
+  const pairs = buildAlignedLagPairs(sliced, lagDays);
+  if (pairs.length < 10) {
+    return { userId, windowDays, lagDays, storedCount: 0, promotedCount: 0, top: [], message: "Not enough days yet" };
+  }
+
+  const support = computeSupportCounts(pairs);
+
+  const eligibleInputs = Array.from(support.entries())
+    .filter(([, c]) => c >= minSupportDays)
+    .map(([k]) => k);
+
+  const outcomeKeys = ["checkin_mood", "checkin_clarity_score", "checkin_pain_peak", "checkin_pain_region_count", "checkin_energy"].filter(Boolean);
+
+  const engineVersion = "correlation_engine_v1";
+  const allCandidates = [];
+
+  for (const outKey of outcomeKeys) {
+    const ySeries = pairs.map((p) => (p.y && isFiniteNumber(p.y[outKey]) ? p.y[outKey] : null));
+    const yClean = ySeries.filter((v) => isFiniteNumber(v));
+    if (yClean.length < 10) continue;
+
+    const ev = buildExtremeEvents(yClean, 0.2, 0.8);
+
+    const lowFlags = pairs.map((p) => {
+      const v = p.y && p.y[outKey];
+      return isFiniteNumber(v) && ev.low != null ? v <= ev.low : null;
+    });
+
+    const highFlags = pairs.map((p) => {
+      const v = p.y && p.y[outKey];
+      return isFiniteNumber(v) && ev.high != null ? v >= ev.high : null;
+    });
+
+    for (const inKey of eligibleInputs) {
+      const xSeries = pairs.map((p) => (p.x && isFiniteNumber(p.x[inKey]) ? p.x[inKey] : null));
+
+      // Event LOW
+      if (ev.low != null) {
+        const eff = computeEventEffect(xSeries, lowFlags);
+        if (eff && eff.nEvent >= 3) {
+          allCandidates.push({
+            inputKey: inKey,
+            outputKey: outKey,
+            lagDays,
+            mode: "event_low",
+            direction: eff.delta >= 0 ? "positive" : "negative",
+            strength: eff.strength,
+            n: eff.nEvent + eff.nNonEvent,
+            nEvent: eff.nEvent,
+            nNonEvent: eff.nNonEvent,
+            meanEvent: eff.meanEvent,
+            meanNonEvent: eff.meanNonEvent,
+            threshold: ev.low,
+          });
+        }
+      }
+
+      // Event HIGH
+      if (ev.high != null) {
+        const eff = computeEventEffect(xSeries, highFlags);
+        if (eff && eff.nEvent >= 3) {
+          allCandidates.push({
+            inputKey: inKey,
+            outputKey: outKey,
+            lagDays,
+            mode: "event_high",
+            direction: eff.delta >= 0 ? "positive" : "negative",
+            strength: eff.strength,
+            n: eff.nEvent + eff.nNonEvent,
+            nEvent: eff.nEvent,
+            nNonEvent: eff.nNonEvent,
+            meanEvent: eff.meanEvent,
+            meanNonEvent: eff.meanNonEvent,
+            threshold: ev.high,
+          });
+        }
+      }
+
+      // Continuous (Spearman)
+      const xNum = [];
+      const yNum = [];
+      for (let i = 0; i < xSeries.length; i++) {
+        const xv = xSeries[i];
+        const yv = ySeries[i];
+        if (isFiniteNumber(xv) && isFiniteNumber(yv)) {
+          xNum.push(xv);
+          yNum.push(yv);
+        }
+      }
+      if (xNum.length >= 10) {
+        const rho = spearman(xNum, yNum);
+        if (rho != null && Number.isFinite(rho) && Math.abs(rho) >= 0.15) {
+          allCandidates.push({
+            inputKey: inKey,
+            outputKey: outKey,
+            lagDays,
+            mode: "continuous_spearman",
+            direction: rho >= 0 ? "positive" : "negative",
+            strength: rho,
+            n: xNum.length,
+          });
+        }
+      }
+    }
+  }
+
+  // Keep topK per (outputKey, mode)
+  const grouped = new Map();
+  for (const c of allCandidates) {
+    const key = `${c.outputKey}|${c.mode}`;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(c);
+  }
+
+  const top = [];
+  for (const [, list] of grouped.entries()) {
+    top.push(...topByAbsStrength(list, topK));
+  }
+
+  // Store pack (reuse your existing storeUserCorrelationPack)
+  const endDateKey = pairs[pairs.length - 1]?.dateKeyY || sliced[sliced.length - 1]?.dateKey || null;
+
+  const packPayload = {
+    userId,
+    dateKey: endDateKey,
+    algorithmVersion: engineVersion,
+    windowDays,
+    lagDays,
+    createdAt: new Date(),
+    candidates: top,
+    storedCount: top.length,
+  };
+
+  const stored = await storeUserCorrelationPack(db, packPayload);
+
+  return {
+    userId,
+    windowDays,
+    lagDays,
+    storedCount: stored?.storedCount ?? top.length,
+    promotedCount: 0,
+    top: top.slice(0, Math.min(50, top.length)),
+    dateKey: endDateKey,
+  };
 }
