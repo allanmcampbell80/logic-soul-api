@@ -444,6 +444,8 @@ export async function getFoodDetails(db, ids) {
           default_portion: 1,
           nutrients: 1,
           ingredient_profile_v1: 1,
+          ingredients_text: 1,
+          ingredients_parsed: 1,
 
           // OFF support (some docs store nutrition under off_nutriments)
           off_nutriments: 1,
@@ -512,6 +514,10 @@ export async function getFoodDetails(db, ids) {
 
       // This is critical for “1 waffle = 35 g” type logic on-device
       defaultPortion: doc.default_portion || null,
+
+      // Add ingredientsText and ingredientsParsed for iOS decoder
+      ingredientsText: doc.ingredients_text || doc.ingredientsText || null,
+      ingredientsParsed: doc.ingredients_parsed || doc.ingredientsParsed || null,
 
       // Canonical per-100g nutrient baseline for all calculations
       nutrients,
