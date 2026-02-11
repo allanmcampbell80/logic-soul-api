@@ -956,7 +956,9 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
           favorite_rank: favoriteRankById[String(c.doc._id)] || 0,
           favorite_added_at: favoriteMeta[String(c.doc._id)] ? new Date(favoriteMeta[String(c.doc._id)]).toISOString() : null,
           label: c.label,
-          score: c.score
+          score: c.score,
+          ingredients_text: c.doc.ingredients_text || null,
+          ingredients_parsed: Array.isArray(c.doc.ingredients_parsed) ? c.doc.ingredients_parsed : []
         }))
       });
 
@@ -1045,7 +1047,9 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
         favorite_rank: favoriteRankById[String(c.doc._id)] || 0,
         favorite_added_at: favoriteMeta[String(c.doc._id)] ? new Date(favoriteMeta[String(c.doc._id)]).toISOString() : null,
         label: c.label,
-        score: c.score
+        score: c.score,
+        ingredients_text: c.doc.ingredients_text || null,
+        ingredients_parsed: Array.isArray(c.doc.ingredients_parsed) ? c.doc.ingredients_parsed : []
       }))
     });
   }
