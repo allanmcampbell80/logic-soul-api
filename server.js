@@ -7,13 +7,13 @@ isBarcodeLockedParsedMealItem, normalizeBarcodeTo16, coerceUserIdValue } from ".
 import { findBestMatchesForMealItems, enrichMealSearchResultWithUSDAEquivalent } from "./services/mealSearch.js";
 import { buildUserEnrichedDoc, ensureSimpleIngredientsFromParsedList} from "./services/enrich.js";
 import { deleteUserAndAllData, ensureUser, updateUserProfile, patchUserDailyTotals, storeUserEnergySamples, 
-upsertUserEnergySnapshotForDate, addRecoveryEmail, verifyRecoveryEmail, recoverAccount, findUserIdByDeviceId, isValidDateKey, dateFromDateKeyUTC, dateKeyFromDateUTC, addDaysDateKeyUTC,
-computeLogicalDateKeyFromLoggedAt, getFavoritesForRequest} from "./services/users.js";
+upsertUserEnergySnapshotForDate, addRecoveryEmail, verifyRecoveryEmail, recoverAccount, findUserIdByDeviceId, isValidDateKey, dateFromDateKeyUTC, 
+dateKeyFromDateUTC, addDaysDateKeyUTC, computeLogicalDateKeyFromLoggedAt, getFavoritesForRequest} from "./services/users.js";
 import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, deleteUserMeal} from "./services/userMeals.js";
 import { getFoodDetails, attachUSDAEquivalentFoodIdToCandidates, attachUSDAEquivalentFoodIdToDoc, chooseBestCanadianDocForUPC, 
 fetchBestDocForBarcode, makeBarcodeLockedCandidateFromDoc,  } from "./services/foodDetails.js";
 import { getUserFavoritesByUserId, addUserFavoriteByUserId, deleteUserFavoriteByUserId,} from "./services/favorites.js";
-import { storeUserCorrelationPack } from "./services/userAnalysis.js";
+import { storeUserCorrelationPack, runCorrelationEngineForUser } from "./services/userAnalysis.js";
 import { getAwardsForUser, applyAwardEvent } from "./services/awards.js";
 
 const app = express();
@@ -1321,6 +1321,54 @@ app.post("/user-analysis/correlation-pack", async (req, res) => {
     });
   }
 });
+
+//-------------------------------------------------------------------------------------------------------
+
+// POST /user-analysis/run-correlation-engine
+// Server-side longitudinal correlation engine (lag-1 / next-day effects)
+// Body: { userId: string, windowDays?: number, minSupportDays?: number, topK?: number }
+app.post("/user-analysis/run-correlation-engine", async (req, res) => {
+  try {
+    if (!db) return res.status(500).json({ ok: false, error: "DB not ready" });
+
+    const userId = String(req.body?.userId || "").trim();
+    if (!userId) return res.status(400).json({ ok: false, error: "Missing required field 'userId'." });
+
+    const windowDaysRaw = req.body?.windowDays;
+    const minSupportDaysRaw = req.body?.minSupportDays;
+    const topKRaw = req.body?.topK;
+
+    const windowDays =
+      typeof windowDaysRaw === "number" && Number.isFinite(windowDaysRaw) && windowDaysRaw > 7 && windowDaysRaw <= 365
+        ? Math.trunc(windowDaysRaw)
+        : 120;
+
+    const minSupportDays =
+      typeof minSupportDaysRaw === "number" && Number.isFinite(minSupportDaysRaw) && minSupportDaysRaw >= 2 && minSupportDaysRaw <= 30
+        ? Math.trunc(minSupportDaysRaw)
+        : 4;
+
+    const topK =
+      typeof topKRaw === "number" && Number.isFinite(topKRaw) && topKRaw >= 10 && topKRaw <= 500
+        ? Math.trunc(topKRaw)
+        : 150;
+
+    const result = await runCorrelationEngineForUser(db, {
+      userId,
+      windowDays,
+      lagDays: 1,
+      minSupportDays,
+      topK,
+    });
+
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error("[UserAnalysis/RunCorrelationEngine] Error:", err);
+    return res.status(500).json({ ok: false, error: err?.message || "Failed to run correlation engine" });
+  }
+});
+
+
 //-------------------------------------------------------------------------------------------------------
 
 
@@ -2429,3 +2477,4 @@ process.on("SIGTERM", async () => {
     process.exit(0);
   }
 });
+
