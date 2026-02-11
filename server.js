@@ -1306,7 +1306,139 @@ app.post("/users/:id/daily-totals/energy-samples", async (req, res) => {
 
 
 //-------------------------------------------------------------------------------------------------------
-// User Analysis
+
+// DEBUG: GET /user-analysis/debug-window?userId=...&windowDays=30&lagDays=1
+// Returns which days exist in user_daily_totals and whether they have the required outputs to form lagged pairs.
+app.get("/user-analysis/debug-window", async (req, res) => {
+  try {
+    if (!db) return res.status(500).json({ ok: false, error: "DB not ready" });
+
+    const userIdRaw = String(req.query?.userId || "").trim();
+    if (!userIdRaw) return res.status(400).json({ ok: false, error: "Missing required query param 'userId'." });
+
+    const windowDaysRaw = req.query?.windowDays;
+    const lagDaysRaw = req.query?.lagDays;
+
+    const windowDays =
+      typeof windowDaysRaw === "string" && /^[0-9]+$/.test(windowDaysRaw)
+        ? Math.min(Math.max(parseInt(windowDaysRaw, 10), 2), 365)
+        : 30;
+
+    const lagDays =
+      typeof lagDaysRaw === "string" && /^[0-9]+$/.test(lagDaysRaw)
+        ? Math.min(Math.max(parseInt(lagDaysRaw, 10), 0), 14)
+        : 1;
+
+    const totalsCol = db.collection("user_daily_totals");
+
+    // Query both ObjectId + string userId variants
+    const userIdValue = coerceUserIdValue(userIdRaw);
+    const userIdFilters = [{ userId: userIdValue }];
+    const userIdStr = String(userIdRaw);
+    if (userIdStr && userIdStr !== String(userIdValue)) {
+      userIdFilters.push({ userId: userIdStr });
+    }
+
+    // Pull the most recent windowDays docs (dateKey is YYYY-MM-DD; lexicographic sort works)
+    const docs = await totalsCol
+      .find({ $or: userIdFilters }, { projection: { dateKey: 1, timezone: 1, totals: 1, updatedAt: 1, createdAt: 1 } })
+      .sort({ dateKey: -1 })
+      .limit(windowDays + lagDays + 2)
+      .toArray();
+
+    const byDateKey = new Map();
+    for (const d of docs || []) {
+      if (!d?.dateKey) continue;
+      byDateKey.set(String(d.dateKey), d);
+    }
+
+    const dateKeys = Array.from(byDateKey.keys()).sort();
+
+    const hasOutput = (totals) => {
+      const t = totals || {};
+      const mood = t.checkin_mood;
+      const clarity = t.checkin_clarity_score;
+      const painPeak = t.checkin_pain_peak;
+      const outside = t.checkin_outside_minutes;
+      const exercise = t.checkin_exercise;
+
+      // Consider the day “output-ready” if any check-in signal exists.
+      return (
+        (typeof mood === "number" && Number.isFinite(mood)) ||
+        (typeof clarity === "number" && Number.isFinite(clarity)) ||
+        (typeof painPeak === "number" && Number.isFinite(painPeak)) ||
+        (typeof outside === "number" && Number.isFinite(outside)) ||
+        (typeof exercise === "number" && Number.isFinite(exercise))
+      );
+    };
+
+    const hasInput = (totals) => {
+      const t = totals || {};
+      const energy = t.energy_kcal;
+      const protein = t.protein_g;
+      const carbs = t.carbs_g;
+      const fat = t.fat_g;
+      const weather = t.weather_temp_c;
+
+      // Consider the day “input-ready” if any nutrition or weather signal exists.
+      return (
+        (typeof energy === "number" && Number.isFinite(energy) && energy > 0) ||
+        (typeof protein === "number" && Number.isFinite(protein) && protein > 0) ||
+        (typeof carbs === "number" && Number.isFinite(carbs) && carbs > 0) ||
+        (typeof fat === "number" && Number.isFinite(fat) && fat > 0) ||
+        (typeof weather === "number" && Number.isFinite(weather))
+      );
+    };
+
+    const days = dateKeys.map((k) => {
+      const d = byDateKey.get(k);
+      const totals = d?.totals || {};
+      return {
+        dateKey: k,
+        hasInput: hasInput(totals),
+        hasOutput: hasOutput(totals),
+        mood: totals.checkin_mood ?? null,
+        painPeak: totals.checkin_pain_peak ?? null,
+        clarity: totals.checkin_clarity_score ?? null,
+        energy_kcal: totals.energy_kcal ?? null,
+        outsideMin: totals.checkin_outside_minutes ?? null,
+        updatedAt: d?.updatedAt ?? null,
+        createdAt: d?.createdAt ?? null,
+      };
+    });
+
+    // Build lagged pairs DayT -> Day(T+lagDays)
+    const pairs = [];
+    for (let i = 0; i < dateKeys.length; i++) {
+      const kIn = dateKeys[i];
+      const kOut = addDaysDateKeyUTC(kIn, lagDays);
+      if (!byDateKey.has(kOut)) continue;
+      const dIn = byDateKey.get(kIn);
+      const dOut = byDateKey.get(kOut);
+
+      const inOk = hasInput(dIn?.totals);
+      const outOk = hasOutput(dOut?.totals);
+      pairs.push({ inputDateKey: kIn, outputDateKey: kOut, inOk, outOk, ok: inOk && outOk });
+    }
+
+    const okPairs = pairs.filter((p) => p.ok);
+
+    return res.json({
+      ok: true,
+      userId: userIdRaw,
+      windowDays,
+      lagDays,
+      dayCount: days.length,
+      pairCount: pairs.length,
+      okPairCount: okPairs.length,
+      days,
+      pairs,
+    });
+  } catch (err) {
+    console.error("[UserAnalysis/DebugWindow] Error:", err);
+    return res.status(500).json({ ok: false, error: err?.message || "Failed to debug window" });
+  }
+});
 
 // GET /users/:id/correlations
 // Returns user-facing (surfaced) correlations from `user_correlations`.
