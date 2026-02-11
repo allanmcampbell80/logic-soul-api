@@ -1353,6 +1353,10 @@ app.get("/users/:id/correlations", async (req, res) => {
       $and: [
         { $or: userIdFilters },
         ...(surfacedOnly ? [{ isSurfaced: true }] : []),
+
+        // Only return complete correlation rows (avoid legacy/placeholder docs)
+        { inputKey: { $exists: true, $type: "string", $ne: "" } },
+        { outputKey: { $exists: true, $type: "string", $ne: "" } },
       ],
     };
 
