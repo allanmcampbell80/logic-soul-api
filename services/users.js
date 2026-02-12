@@ -1410,95 +1410,69 @@ export async function seedUserDailyGoals(db, userId, options = {}) {
   };
 }
 
-export async function patchUserDailyGoals(db, userId, updates, options = {}) {
-  if (!db) throw new Error("DB not ready");
+export async function patchUserDailyGoals(db, userId, patch) {
+  if (!db) {
+    const err = new Error("DB not ready");
+    err.statusCode = 500;
+    throw err;
+  }
 
   const cleanUserId = String(userId || "").trim();
-  const userQuery = buildUserIdQuery(cleanUserId);
-  if (!userQuery) {
-    const err = new Error("Missing or invalid 'userId'");
+  if (!cleanUserId || !ObjectId.isValid(cleanUserId)) {
+    const err = new Error("Missing or invalid userId");
     err.statusCode = 400;
     throw err;
   }
 
-  if (!updates || typeof updates !== "object" || Array.isArray(updates)) {
-    const err = new Error("Missing or invalid 'updates' (expected object)");
-    err.statusCode = 400;
-    throw err;
-  }
+  const usersCol = db.collection("users");
+  const userObjectId = new ObjectId(cleanUserId);
 
-  // Build validated patch for nested fields: dailyGoals.goals.<key> = { value, unit }
-  const setObj = {};
-  const applied = [];
-
-  for (const [k, v] of Object.entries(updates)) {
-    const key = String(k || "").trim();
-    if (!key) continue;
-
-    const n = validateDailyGoalUpdate(key, v);
-    const unit = defaultUnitForKey(key);
-
-    setObj[`dailyGoals.goals.${key}`] = { value: n, unit };
-    applied.push(key);
-  }
-
-  if (!applied.length) {
-    const err = new Error("No valid daily goal updates provided");
-    err.statusCode = 400;
-    throw err;
-  }
-
-  const now = new Date();
-  setObj["dailyGoals.updatedAt"] = now;
-  setObj["dailyGoals.profileKey"] = typeof options.profileKey === "string" ? options.profileKey : DAILY_GOALS_PROFILE_KEY;
-  setObj["dailyGoals.version"] = (typeof options.version === "number" && Number.isFinite(options.version)) ? options.version : DAILY_GOALS_VERSION;
-  setObj["dailyGoals.source"] = "user";
-  setObj["lastSeenAt"] = now;
-
-  const usersCollection = db.collection("users");
-
-  // Use a pipeline update so we can safely initialize `dailyGoals` if missing
-  // without conflicting with nested updates like `dailyGoals.goals.<key>`.
-  const initDailyGoals = {
-    version: DAILY_GOALS_VERSION,
-    profileKey: DAILY_GOALS_PROFILE_KEY,
-    source: "user",
-    updatedAt: now,
-    goals: {},
-  };
-
-  const result = await usersCollection.findOneAndUpdate(
-    userQuery,
-    [
-      {
-        $set: {
-          dailyGoals: { $ifNull: ["$dailyGoals", initDailyGoals] },
-        },
-      },
-      {
-        $set: setObj,
-      },
-    ],
-    { returnDocument: "after", returnOriginal: false }
+  // Confirm user exists (ObjectId match)
+  const existing = await usersCol.findOne(
+    { _id: userObjectId },
+    { projection: { _id: 1, age: 1, gender: 1, dailyGoals: 1 } }
   );
 
-  const doc = result?.value;
-  if (!doc) {
+  if (!existing?._id) {
     const err = new Error("User not found");
     err.statusCode = 404;
     throw err;
   }
 
-  // Compute effective goals for client convenience (defaults merged with overrides)
-  const fullUser = await usersCollection.findOne(userQuery, { projection: { dailyGoals: 1, age: 1, gender: 1 } });
-  const defaults = buildDefaultDailyGoalsFromProfile({ age: fullUser?.age, gender: fullUser?.gender });
-  const effective = mergeDailyGoals(defaults, fullUser?.dailyGoals ?? doc.dailyGoals);
+  const patchObj =
+    patch && typeof patch === "object" && !Array.isArray(patch) ? patch : {};
 
-  return {
-    ok: true,
-    userId: cleanUserId,
-    updatedKeys: applied,
-    dailyGoals: doc.dailyGoals ?? null,
-    effectiveDailyGoals: effective,
-  };
+  // Build $set ops targeting nested fields ONLY (avoid Mongo path conflicts)
+  const setOps = {};
+  for (const [k, v] of Object.entries(patchObj)) {
+    if (typeof k !== "string" || !k.trim()) continue;
+
+    const key = k.trim();
+
+    // Validate + coerce to finite number (uses your existing helpers)
+    const n = validateDailyGoalUpdate(key, v);
+
+    // Preserve unit if it already exists; otherwise infer from key
+    const existingUnit = existing?.dailyGoals?.goals?.[key]?.unit ?? null;
+    const unit = existingUnit || defaultUnitForKey(key);
+
+    setOps[`dailyGoals.goals.${key}.value`] = n;
+    if (unit) setOps[`dailyGoals.goals.${key}.unit`] = unit;
+  }
+
+  if (Object.keys(setOps).length === 0) {
+    const err = new Error("No valid numeric fields to patch");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const now = new Date();
+  setOps["dailyGoals.updatedAt"] = now;
+  setOps["dailyGoals.source"] = "user";
+
+  // IMPORTANT: Never $set the whole dailyGoals object here.
+  await usersCol.updateOne({ _id: userObjectId }, { $set: setOps });
+
+  // Return merged bundle consistent with GET/SEED
+  return await getUserDailyGoals(db, cleanUserId);
 }
