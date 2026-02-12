@@ -470,12 +470,22 @@ app.get("/users/:id/daily-goals", async (req, res) => {
       });
     }
 
-    const dailyGoals = await getUserDailyGoals(db, userId);
-    if (!dailyGoals) {
+    const result = await getUserDailyGoals(db, userId);
+    if (!result) {
       return res.status(404).json({ ok: false, error: "User not found" });
     }
 
-    return res.json({ ok: true, userId, dailyGoals });
+    // Backwards/forwards compatible: services may return either a bundle directly
+    // or an object containing { dailyGoals, effectiveDailyGoals }.
+    const dailyGoals = (result && typeof result === "object" && "dailyGoals" in result)
+      ? (result.dailyGoals || null)
+      : result;
+
+    const effectiveDailyGoals = (result && typeof result === "object" && "effectiveDailyGoals" in result)
+      ? (result.effectiveDailyGoals || dailyGoals || { goals: {} })
+      : (dailyGoals || { goals: {} });
+
+    return res.json({ ok: true, userId, dailyGoals, effectiveDailyGoals });
   } catch (err) {
     console.error("[Users/DailyGoals/Get] Error:", err);
     const status = err?.statusCode || 500;
@@ -509,7 +519,9 @@ app.post("/users/:id/daily-goals/seed", async (req, res) => {
       return res.status(404).json({ ok: false, error: "User not found" });
     }
 
-    return res.json({ ok: true, userId, dailyGoals: result.dailyGoals || {}, seeded: !!result.seeded });
+    const dailyGoals = result.dailyGoals || {};
+    const effectiveDailyGoals = result.effectiveDailyGoals || dailyGoals || { goals: {} };
+    return res.json({ ok: true, userId, dailyGoals, effectiveDailyGoals, seeded: !!result.seeded });
   } catch (err) {
     console.error("[Users/DailyGoals/Seed] Error:", err);
     const status = err?.statusCode || 500;
@@ -541,7 +553,9 @@ app.patch("/users/:id/daily-goals", async (req, res) => {
       return res.status(404).json({ ok: false, error: "User not found" });
     }
 
-    return res.json({ ok: true, userId, dailyGoals: result.dailyGoals || {} });
+    const dailyGoals = result.dailyGoals || {};
+    const effectiveDailyGoals = result.effectiveDailyGoals || dailyGoals || { goals: {} };
+    return res.json({ ok: true, userId, dailyGoals, effectiveDailyGoals });
   } catch (err) {
     console.error("[Users/DailyGoals/Patch] Error:", err);
     const status = err?.statusCode || 500;
@@ -2843,4 +2857,3 @@ process.on("SIGTERM", async () => {
     process.exit(0);
   }
 });
-
