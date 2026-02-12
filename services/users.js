@@ -1456,23 +1456,29 @@ export async function patchUserDailyGoals(db, userId, updates, options = {}) {
   setObj["lastSeenAt"] = now;
 
   const usersCollection = db.collection("users");
-  const updateDoc = {
-    $set: setObj,
-    $setOnInsert: {
-      dailyGoals: {
-        version: DAILY_GOALS_VERSION,
-        profileKey: DAILY_GOALS_PROFILE_KEY,
-        source: "user",
-        updatedAt: now,
-        goals: {},
-      },
-      createdAt: now,
-    },
+
+  // Use a pipeline update so we can safely initialize `dailyGoals` if missing
+  // without conflicting with nested updates like `dailyGoals.goals.<key>`.
+  const initDailyGoals = {
+    version: DAILY_GOALS_VERSION,
+    profileKey: DAILY_GOALS_PROFILE_KEY,
+    source: "user",
+    updatedAt: now,
+    goals: {},
   };
 
   const result = await usersCollection.findOneAndUpdate(
     userQuery,
-    updateDoc,
+    [
+      {
+        $set: {
+          dailyGoals: { $ifNull: ["$dailyGoals", initDailyGoals] },
+        },
+      },
+      {
+        $set: setObj,
+      },
+    ],
     { returnDocument: "after", returnOriginal: false }
   );
 
