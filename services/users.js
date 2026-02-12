@@ -1309,21 +1309,15 @@ export async function getUserDailyGoals(db, userId) {
   if (!db) throw new Error("DB not ready");
 
   const cleanUserId = String(userId || "").trim();
-  if (!cleanUserId) {
-    const err = new Error("Missing or invalid 'userId'");
-    err.statusCode = 400;
-    throw err;
-  }
-
-  const query = buildUserIdQuery(cleanUserId);
-  if (!query) {
+  const userQuery = buildUserIdQuery(cleanUserId);
+  if (!userQuery) {
     const err = new Error("Missing or invalid 'userId'");
     err.statusCode = 400;
     throw err;
   }
 
   const usersCollection = db.collection("users");
-  const user = await usersCollection.findOne(query, { projection: { dailyGoals: 1, age: 1, gender: 1 } });
+  const user = await usersCollection.findOne(userQuery, { projection: { dailyGoals: 1, age: 1, gender: 1 } });
 
   if (!user) {
     const err = new Error("User not found");
@@ -1348,7 +1342,8 @@ export async function seedUserDailyGoals(db, userId, options = {}) {
   if (!db) throw new Error("DB not ready");
 
   const cleanUserId = String(userId || "").trim();
-  if (!cleanUserId) {
+  const userQuery = buildUserIdQuery(cleanUserId);
+  if (!userQuery) {
     const err = new Error("Missing or invalid 'userId'");
     err.statusCode = 400;
     throw err;
@@ -1356,16 +1351,9 @@ export async function seedUserDailyGoals(db, userId, options = {}) {
 
   const force = options && options.force === true;
 
-  const query = buildUserIdQuery(cleanUserId);
-  if (!query) {
-    const err = new Error("Missing or invalid 'userId'");
-    err.statusCode = 400;
-    throw err;
-  }
-
   const usersCollection = db.collection("users");
 
-  const user = await usersCollection.findOne(query, {
+  const user = await usersCollection.findOne(userQuery, {
     projection: { dailyGoals: 1, age: 1, gender: 1 },
   });
 
@@ -1400,7 +1388,7 @@ export async function seedUserDailyGoals(db, userId, options = {}) {
   };
 
   const result = await usersCollection.findOneAndUpdate(
-    query,
+    userQuery,
     {
       $set: {
         dailyGoals,
@@ -1426,7 +1414,8 @@ export async function patchUserDailyGoals(db, userId, updates, options = {}) {
   if (!db) throw new Error("DB not ready");
 
   const cleanUserId = String(userId || "").trim();
-  if (!cleanUserId) {
+  const userQuery = buildUserIdQuery(cleanUserId);
+  if (!userQuery) {
     const err = new Error("Missing or invalid 'userId'");
     err.statusCode = 400;
     throw err;
@@ -1434,13 +1423,6 @@ export async function patchUserDailyGoals(db, userId, updates, options = {}) {
 
   if (!updates || typeof updates !== "object" || Array.isArray(updates)) {
     const err = new Error("Missing or invalid 'updates' (expected object)");
-    err.statusCode = 400;
-    throw err;
-  }
-
-  const query = buildUserIdQuery(cleanUserId);
-  if (!query) {
-    const err = new Error("Missing or invalid 'userId'");
     err.statusCode = 400;
     throw err;
   }
@@ -1474,9 +1456,23 @@ export async function patchUserDailyGoals(db, userId, updates, options = {}) {
   setObj["lastSeenAt"] = now;
 
   const usersCollection = db.collection("users");
+  const updateDoc = {
+    $set: setObj,
+    $setOnInsert: {
+      dailyGoals: {
+        version: DAILY_GOALS_VERSION,
+        profileKey: DAILY_GOALS_PROFILE_KEY,
+        source: "user",
+        updatedAt: now,
+        goals: {},
+      },
+      createdAt: now,
+    },
+  };
+
   const result = await usersCollection.findOneAndUpdate(
-    query,
-    { $set: setObj },
+    userQuery,
+    updateDoc,
     { returnDocument: "after", returnOriginal: false }
   );
 
@@ -1488,7 +1484,7 @@ export async function patchUserDailyGoals(db, userId, updates, options = {}) {
   }
 
   // Compute effective goals for client convenience (defaults merged with overrides)
-  const fullUser = await usersCollection.findOne(query, { projection: { dailyGoals: 1, age: 1, gender: 1 } });
+  const fullUser = await usersCollection.findOne(userQuery, { projection: { dailyGoals: 1, age: 1, gender: 1 } });
   const defaults = buildDefaultDailyGoalsFromProfile({ age: fullUser?.age, gender: fullUser?.gender });
   const effective = mergeDailyGoals(defaults, fullUser?.dailyGoals ?? doc.dailyGoals);
 
