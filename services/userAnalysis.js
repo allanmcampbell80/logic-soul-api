@@ -121,6 +121,14 @@ function normalizeCandidate(c) {
   if (Number.isFinite(Number(c.threshold))) extras.threshold = Number(c.threshold);
   if (Number.isFinite(Number(c.delta))) extras.delta = Number(c.delta);
 
+  // Daily roundup extras (safe, optional)
+  if (Number.isFinite(Number(c.value))) extras.value = Number(c.value);
+  if (Number.isFinite(Number(c.goal))) extras.goal = Number(c.goal);
+  if (Number.isFinite(Number(c.pctGoal))) extras.pctGoal = Number(c.pctGoal);
+  if (Number.isFinite(Number(c.coverage))) extras.coverage = Number(c.coverage);
+  if (typeof c.bucket === "string" && c.bucket.trim()) extras.bucket = c.bucket.trim();
+  if (typeof c.isTrustedDay === "boolean") extras.isTrustedDay = c.isTrustedDay;
+
   return { ...base, ...extras };
 }
 
@@ -345,6 +353,253 @@ function computeEventEffect(featureVals, eventFlags) {
   return { nEvent: a.length, nNonEvent: b.length, meanEvent: ma, meanNonEvent: mb, strength: d, delta };
 }
 
+// ------------------------------------------------------------
+// Daily Roundup (Stage 1)
+// Goal: For each day, flag nutrients that are meaningfully under/over user daily targets.
+// Notes:
+// - Uses a simple completeness heuristic so "low" flags are not created on likely-incomplete days.
+// - Still records "over" flags even on low-calorie days when a nutrient is already near/over target.
+// - Stored as its own correlation pack with algorithmVersion `daily_roundup_v1`.
+// ------------------------------------------------------------
+
+function defaultDailyGoals() {
+  // Conservative, general defaults. Later: move to user profile.
+  return {
+    energy_kcal: 2000,
+    protein_g: 50,
+    fiber_g: 30,
+    sodium_mg: 2300,
+    sugars_g: 50,
+    sat_fat_g: 20,
+    caffeine_mg: 400,
+    water_total_ml: 2000,
+  };
+}
+
+async function getDailyGoalsForUser(db, userIdRaw) {
+  // Best-effort: read from users.dailyGoals.goals; fallback to defaults.
+  const fallback = defaultDailyGoals();
+
+  try {
+    if (!db) return fallback;
+    const idStr = String(userIdRaw || "").trim();
+    if (!ObjectId.isValid(idStr)) return fallback;
+
+    const usersCol = db.collection("users");
+    const u = await usersCol.findOne(
+      { _id: new ObjectId(idStr) },
+      { projection: { dailyGoals: 1 } }
+    );
+
+    const dg = u && typeof u.dailyGoals === "object" ? u.dailyGoals : null;
+    if (!dg) return fallback;
+
+    // New shape (2026-02):
+    // dailyGoals: {
+    //   version: number,
+    //   profileKey: string,
+    //   source: string,
+    //   updatedAt: date,
+    //   goals: {
+    //     protein_g: { value: 100, unit: "g" },
+    //     vitamin_c_mg: { value: 100, unit: "mg" },
+    //     ...
+    //   }
+    // }
+    const goalsObj = dg && typeof dg.goals === "object" ? dg.goals : null;
+    if (!goalsObj) return fallback;
+
+    // Merge user overrides on top of defaults; only keep finite positive numbers.
+    const merged = { ...fallback };
+
+    for (const [k, v] of Object.entries(goalsObj)) {
+      // Accept either the new { value, unit } form or a legacy numeric value.
+      let raw = v;
+      if (raw && typeof raw === "object" && "value" in raw) raw = raw.value;
+
+      const n = typeof raw === "number" ? raw : Number(raw);
+      if (Number.isFinite(n) && n > 0) merged[k] = n;
+    }
+
+    return merged;
+  } catch {
+    return fallback;
+  }
+}
+
+function computeEnergyCoverage(totals, totalsEstimated, energyGoal) {
+  const t = totals && typeof totals === "object" ? totals : {};
+  const e = totalsEstimated && typeof totalsEstimated === "object" ? totalsEstimated : {};
+  const energyLogged =
+    (isFiniteNumber(t.energy_kcal) ? t.energy_kcal : 0) +
+    (isFiniteNumber(e.energy_kcal) ? e.energy_kcal : 0);
+
+  const goal = isFiniteNumber(energyGoal) && energyGoal > 0 ? energyGoal : 2000;
+  const coverage = goal > 0 ? energyLogged / goal : 0;
+  return { energyLogged, coverage: clamp(coverage, 0, 3) };
+}
+
+function buildDailyRoundupCandidatesForDay(dayDoc, goals) {
+  const totals = dayDoc && typeof dayDoc.totals === "object" ? dayDoc.totals : {};
+  const totalsEstimated = dayDoc && typeof dayDoc.totals_estimated === "object" ? dayDoc.totals_estimated : {};
+
+  const goalEnergy = isFiniteNumber(goals?.energy_kcal) ? goals.energy_kcal : 2000;
+  const { energyLogged, coverage } = computeEnergyCoverage(totals, totalsEstimated, goalEnergy);
+
+  // Trust heuristic:
+  // - If coverage >= 0.60, assume the day is reasonably complete.
+  // - Below that, we avoid creating "low" flags (they could be missing logs).
+  const isTrustedDay = coverage >= 0.60;
+
+  // Thresholds (tunable)
+  const LOW_PCT = 0.80;   // under target
+  const HIGH_PCT = 1.20;  // over target
+  const OVER_ANYWAY_PCT = 1.00; // record overs even if day looks incomplete when already >= 100%
+
+  const candidates = [];
+
+  // Evaluate every goal key that exists in totals.
+  const goalEntries = goals && typeof goals === "object" ? Object.entries(goals) : [];
+  for (const [nutrKey, goalValRaw] of goalEntries) {
+    const goalVal = typeof goalValRaw === "number" ? goalValRaw : Number(goalValRaw);
+    if (!Number.isFinite(goalVal) || goalVal <= 0) continue;
+
+    // Pull actual from totals + estimated. (Estimated is additive, same as energy.)
+    const actual =
+      (isFiniteNumber(totals[nutrKey]) ? totals[nutrKey] : 0) +
+      (isFiniteNumber(totalsEstimated[nutrKey]) ? totalsEstimated[nutrKey] : 0);
+
+    // If there's truly no signal at all, skip.
+    if (!Number.isFinite(actual)) continue;
+
+    const pctGoal = goalVal > 0 ? actual / goalVal : null;
+    if (pctGoal == null || !Number.isFinite(pctGoal)) continue;
+
+    // Decide whether to record an event.
+    // - Record LOW only if trusted day.
+    // - Record HIGH always if pct >= 1.0 (OVER_ANYWAY_PCT), or if trusted and pct >= 1.2.
+    let bucket = "ok";
+    let shouldRecord = false;
+
+    if (pctGoal < LOW_PCT) {
+      bucket = "low";
+      shouldRecord = isTrustedDay; // only trust lows on complete-ish days
+    } else if (pctGoal >= HIGH_PCT) {
+      bucket = "high";
+      shouldRecord = true;
+    } else if (pctGoal >= OVER_ANYWAY_PCT && !isTrustedDay) {
+      bucket = "high";
+      shouldRecord = true;
+    }
+
+    if (!shouldRecord) continue;
+
+    // Represent as a candidate row so it can live in the same pack storage.
+    // strength is signed deviation from target: pctGoal - 1.
+    const deviation = pctGoal - 1;
+
+    candidates.push({
+      inputKey: nutrKey,
+      outputKey: "daily_roundup",
+      mode: "daily_roundup",
+      direction: deviation >= 0 ? "positive" : "negative",
+      strength: deviation,
+      value: actual,
+      goal: goalVal,
+      pctGoal,
+      coverage,
+      bucket,
+      isTrustedDay,
+    });
+  }
+
+  // Extra signal: macro composition flags (example: sugar energy ratio high)
+  // Only if energy is meaningful.
+  if (isFiniteNumber(energyLogged) && energyLogged >= 500) {
+    const sugarG = isFiniteNumber(totals.sugars_g) ? totals.sugars_g : 0;
+    const proteinG = isFiniteNumber(totals.protein_g) ? totals.protein_g : 0;
+    const fatG = isFiniteNumber(totals.fat_g) ? totals.fat_g : 0;
+
+    const sugarKcal = sugarG * 4;
+    const proteinKcal = proteinG * 4;
+    const fatKcal = fatG * 9;
+
+    const sugarRatio = energyLogged > 0 ? sugarKcal / energyLogged : 0;
+    const proteinRatio = energyLogged > 0 ? proteinKcal / energyLogged : 0;
+    const fatRatio = energyLogged > 0 ? fatKcal / energyLogged : 0;
+
+    // These are "bad day" composition signals; record regardless of trust if extreme.
+    if (Number.isFinite(sugarRatio) && sugarRatio >= 0.35) {
+      candidates.push({
+        inputKey: "macro:sugar_energy_ratio",
+        outputKey: "daily_roundup",
+        mode: "daily_roundup",
+        direction: "positive",
+        strength: sugarRatio, // 0..1
+        value: sugarRatio,
+        goal: 0.35,
+        pctGoal: sugarRatio / 0.35,
+        coverage,
+        bucket: "high",
+        isTrustedDay,
+      });
+    }
+
+    if (Number.isFinite(proteinRatio) && proteinRatio <= 0.12 && isTrustedDay) {
+      candidates.push({
+        inputKey: "macro:protein_energy_ratio",
+        outputKey: "daily_roundup",
+        mode: "daily_roundup",
+        direction: "negative",
+        strength: proteinRatio,
+        value: proteinRatio,
+        goal: 0.12,
+        pctGoal: proteinRatio / 0.12,
+        coverage,
+        bucket: "low",
+        isTrustedDay,
+      });
+    }
+
+    if (Number.isFinite(fatRatio) && fatRatio >= 0.55) {
+      candidates.push({
+        inputKey: "macro:fat_energy_ratio",
+        outputKey: "daily_roundup",
+        mode: "daily_roundup",
+        direction: "positive",
+        strength: fatRatio,
+        value: fatRatio,
+        goal: 0.55,
+        pctGoal: fatRatio / 0.55,
+        coverage,
+        bucket: "high",
+        isTrustedDay,
+      });
+    }
+  }
+
+  return { candidates, coverage, isTrustedDay, energyLogged };
+}
+
+async function storeDailyRoundupPack(db, userId, dayDoc, goals) {
+  const dateKey = typeof dayDoc?.dateKey === "string" ? dayDoc.dateKey : null;
+  if (!dateKey) return { storedCount: 0, dateKey: null };
+
+  const { candidates } = buildDailyRoundupCandidatesForDay(dayDoc, goals);
+
+  const payload = {
+    userId: String(userId),
+    dateKey,
+    algorithmVersion: "daily_roundup_v1",
+    candidates,
+    storedCount: candidates.length,
+    updatedAt: new Date(),
+  };
+
+  const stored = await storeUserCorrelationPack(db, payload);
+  return { storedCount: stored?.storedCount ?? candidates.length, dateKey };
+}
+
 // Main engine entry
 export async function runCorrelationEngineForUser(db, options) {
   const userId = String(options?.userId || "").trim();
@@ -366,7 +621,7 @@ export async function runCorrelationEngineForUser(db, options) {
   const allDocs = await totalsCol
     .find(
       { $or: userIdFilters },
-      { projection: { userId: 1, dateKey: 1, totals: 1, ingredients_exposure: 1, updatedAt: 1, createdAt: 1 } }
+      { projection: { userId: 1, dateKey: 1, totals: 1, totals_estimated: 1, ingredients_exposure: 1, updatedAt: 1, createdAt: 1 } }
     )
     .sort({ dateKey: 1 })
     .toArray();
@@ -377,9 +632,40 @@ export async function runCorrelationEngineForUser(db, options) {
 
   sliced.sort((a, b) => (a.dateKey < b.dateKey ? -1 : a.dateKey > b.dateKey ? 1 : 0));
 
+  // Stage 1: Daily roundup (always write)
+  const goals = await getDailyGoalsForUser(db, userId);
+
+  // Store roundup for the latest available day in the slice
+  let roundupStoredCount = 0;
+  let roundupDateKey = null;
+  if (sliced.length > 0) {
+    const latestDay = sliced[sliced.length - 1];
+    const roundupStored = await storeDailyRoundupPack(db, userId, latestDay, goals);
+    roundupStoredCount = roundupStored?.storedCount ?? 0;
+    roundupDateKey = roundupStored?.dateKey ?? null;
+  }
+
+  // Optional backfill over the window (can be enabled via options.backfillRoundups=true)
+  let roundupBackfilledDays = 0;
+  if (options?.backfillRoundups === true) {
+    for (const d of sliced) {
+      const r = await storeDailyRoundupPack(db, userId, d, goals);
+      if ((r?.storedCount ?? 0) >= 0) roundupBackfilledDays += 1;
+    }
+  }
+
   const pairs = buildAlignedLagPairs(sliced, lagDays);
   if (pairs.length < 10) {
-    return { userId, windowDays, lagDays, storedCount: 0, promotedCount: 0, top: [], message: "Not enough days yet" };
+    return {
+      userId,
+      windowDays,
+      lagDays,
+      storedCount: 0,
+      promotedCount: 0,
+      top: [],
+      message: "Not enough aligned day-pairs yet for correlations (daily roundup stored).",
+      roundup: { storedCount: roundupStoredCount, dateKey: roundupDateKey, backfilledDays: roundupBackfilledDays },
+    };
   }
 
   const support = computeSupportCounts(pairs);
@@ -519,6 +805,7 @@ export async function runCorrelationEngineForUser(db, options) {
     storedCount: stored?.storedCount ?? top.length,
     promotedCount: 0,
     top: top.slice(0, Math.min(50, top.length)),
+    roundup: { storedCount: roundupStoredCount, dateKey: roundupDateKey, backfilledDays: roundupBackfilledDays },
     dateKey: endDateKey,
   };
 }
