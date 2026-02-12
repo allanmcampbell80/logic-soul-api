@@ -972,6 +972,7 @@ export async function getFavoritesForRequest(db, req) {
 //--------------------------------------------------------------------------------------------------------
 // Daily Goals (server-side targets)
 
+const DAILY_GOALS_PROFILE_KEY = "dri_v1";
 const DAILY_GOALS_VERSION = 1;
 
 // Whitelist keys we allow clients to set. Keep this aligned with iOS NutrientTargetsView
@@ -1278,9 +1279,29 @@ function buildDefaultDailyGoalsFromProfile({ age, gender }) {
 
   return {
     version: DAILY_GOALS_VERSION,
+    profileKey: DAILY_GOALS_PROFILE_KEY,
     source: "default",
     updatedAt: new Date(),
     goals,
+  };
+}
+
+function mergeDailyGoals(defaultDailyGoals, storedDailyGoals) {
+  const base = defaultDailyGoals && typeof defaultDailyGoals === "object" ? defaultDailyGoals : null;
+  const stored = storedDailyGoals && typeof storedDailyGoals === "object" ? storedDailyGoals : null;
+
+  const baseGoals = base && base.goals && typeof base.goals === "object" ? base.goals : {};
+  const overrideGoals = stored && stored.goals && typeof stored.goals === "object" ? stored.goals : {};
+
+  // Shallow merge is correct here because each goal is { value, unit }
+  const effectiveGoals = { ...baseGoals, ...overrideGoals };
+
+  return {
+    version: typeof stored?.version === "number" ? stored.version : (typeof base?.version === "number" ? base.version : DAILY_GOALS_VERSION),
+    profileKey: typeof stored?.profileKey === "string" ? stored.profileKey : (typeof base?.profileKey === "string" ? base.profileKey : DAILY_GOALS_PROFILE_KEY),
+    source: stored?.source ?? base?.source ?? "default",
+    updatedAt: stored?.updatedAt ?? base?.updatedAt ?? new Date(),
+    goals: effectiveGoals,
   };
 }
 
@@ -1302,7 +1323,7 @@ export async function getUserDailyGoals(db, userId) {
   }
 
   const usersCollection = db.collection("users");
-  const user = await usersCollection.findOne(query, { projection: { dailyGoals: 1 } });
+  const user = await usersCollection.findOne(query, { projection: { dailyGoals: 1, age: 1, gender: 1 } });
 
   if (!user) {
     const err = new Error("User not found");
@@ -1310,10 +1331,16 @@ export async function getUserDailyGoals(db, userId) {
     throw err;
   }
 
+  const defaults = buildDefaultDailyGoalsFromProfile({ age: user.age, gender: user.gender });
+  const effective = mergeDailyGoals(defaults, user.dailyGoals);
+
   return {
     ok: true,
     userId: cleanUserId,
+    // What is physically stored on the user document (overrides only in the new approach)
     dailyGoals: user.dailyGoals ?? null,
+    // What clients + analysis should use (defaults merged with overrides)
+    effectiveDailyGoals: effective,
   };
 }
 
@@ -1358,13 +1385,15 @@ export async function seedUserDailyGoals(db, userId, options = {}) {
     };
   }
 
-  // Require at least age+gender to seed in a personalized way.
-  // If missing, we still seed with generic defaults.
-  const dailyGoals = buildDefaultDailyGoalsFromProfile({ age: user.age, gender: user.gender });
-
+  // Overrides-only: store an empty goals map. Defaults are computed on demand.
   const now = new Date();
-  dailyGoals.updatedAt = now;
-  dailyGoals.source = "default";
+  const dailyGoals = {
+    version: DAILY_GOALS_VERSION,
+    profileKey: DAILY_GOALS_PROFILE_KEY,
+    source: "default",
+    updatedAt: now,
+    goals: {},
+  };
 
   const result = await usersCollection.findOneAndUpdate(
     query,
@@ -1377,10 +1406,14 @@ export async function seedUserDailyGoals(db, userId, options = {}) {
     { returnDocument: "after", returnOriginal: false }
   );
 
+  const defaults = buildDefaultDailyGoalsFromProfile({ age: user.age, gender: user.gender });
+  const effective = mergeDailyGoals(defaults, result?.value?.dailyGoals ?? dailyGoals);
+
   return {
     ok: true,
     userId: cleanUserId,
     dailyGoals: result?.value?.dailyGoals ?? dailyGoals,
+    effectiveDailyGoals: effective,
     seeded: true,
   };
 }
@@ -1431,6 +1464,7 @@ export async function patchUserDailyGoals(db, userId, updates, options = {}) {
 
   const now = new Date();
   setObj["dailyGoals.updatedAt"] = now;
+  setObj["dailyGoals.profileKey"] = typeof options.profileKey === "string" ? options.profileKey : DAILY_GOALS_PROFILE_KEY;
   setObj["dailyGoals.version"] = (typeof options.version === "number" && Number.isFinite(options.version)) ? options.version : DAILY_GOALS_VERSION;
   setObj["dailyGoals.source"] = "user";
   setObj["lastSeenAt"] = now;
