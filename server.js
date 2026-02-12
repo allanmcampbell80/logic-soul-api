@@ -2,6 +2,7 @@
 import express from "express";
 import cors from "cors";
 import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
+import { getDriDataset } from "./services/dri/index.js";
 import { notIgnoredQuery, safeTrimString, hasNonEmptyArray, isLikelyDvBoilerplate, scoreCanadianDoc, normalizeNutrientsForClient, 
 isBarcodeLockedParsedMealItem, normalizeBarcodeTo16, coerceUserIdValue } from "./services/utils.js";
 import { findBestMatchesForMealItems, enrichMealSearchResultWithUSDAEquivalent } from "./services/mealSearch.js";
@@ -100,6 +101,44 @@ const REPORT_REASONS = new Set([
   "nutrition_data_wrong",
   "other",
 ]);
+
+// ------------------------------------------------------------------------------------------------------------
+// GET /dri/datasets/:profileKey
+// Returns full DRI dataset definition (for caching on client)
+
+app.get("/dri/datasets/:profileKey", async (req, res) => {
+  try {
+    const profileKey = String(req.params?.profileKey || "").trim();
+
+    if (!profileKey) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing profileKey",
+      });
+    }
+
+    const dataset = getDriDataset(profileKey);
+
+    if (!dataset) {
+      return res.status(404).json({
+        ok: false,
+        error: `Unknown DRI dataset: ${profileKey}`,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      dataset,
+    });
+
+  } catch (err) {
+    console.error("[DRI/Dataset] Error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Failed to load DRI dataset",
+    });
+  }
+});
 
 
 //-----------------------------------------------------------------------------------------------------
