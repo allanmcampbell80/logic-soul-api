@@ -972,7 +972,7 @@ export async function getFavoritesForRequest(db, req) {
 //--------------------------------------------------------------------------------------------------------
 // Daily Goals (server-side targets)
 
-const DAILY_GOALS_VERSION = "dri_v1";
+const DAILY_GOALS_VERSION = 1;
 
 // Whitelist keys we allow clients to set. Keep this aligned with iOS NutrientTargetsView
 // AND with canonical keys stored in user_daily_totals.totals.
@@ -1431,7 +1431,7 @@ export async function patchUserDailyGoals(db, userId, updates, options = {}) {
 
   const now = new Date();
   setObj["dailyGoals.updatedAt"] = now;
-  setObj["dailyGoals.version"] = String(options.version || DAILY_GOALS_VERSION);
+  setObj["dailyGoals.version"] = (typeof options.version === "number" && Number.isFinite(options.version)) ? options.version : DAILY_GOALS_VERSION;
   setObj["dailyGoals.source"] = "user";
   setObj["lastSeenAt"] = now;
 
@@ -1456,4 +1456,3 @@ export async function patchUserDailyGoals(db, userId, updates, options = {}) {
     dailyGoals: doc.dailyGoals ?? null,
   };
 }
-
