@@ -8,7 +8,8 @@ import { findBestMatchesForMealItems, enrichMealSearchResultWithUSDAEquivalent }
 import { buildUserEnrichedDoc, ensureSimpleIngredientsFromParsedList} from "./services/enrich.js";
 import { deleteUserAndAllData, ensureUser, updateUserProfile, patchUserDailyTotals, storeUserEnergySamples, 
 upsertUserEnergySnapshotForDate, addRecoveryEmail, verifyRecoveryEmail, recoverAccount, findUserIdByDeviceId, isValidDateKey, dateFromDateKeyUTC, 
-dateKeyFromDateUTC, addDaysDateKeyUTC, computeLogicalDateKeyFromLoggedAt, getFavoritesForRequest} from "./services/users.js";
+dateKeyFromDateUTC, addDaysDateKeyUTC, computeLogicalDateKeyFromLoggedAt, getFavoritesForRequest,
+getUserDailyGoals, seedUserDailyGoals, patchUserDailyGoals } from "./services/users.js";
 import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, deleteUserMeal} from "./services/userMeals.js";
 import { getFoodDetails, attachUSDAEquivalentFoodIdToCandidates, attachUSDAEquivalentFoodIdToDoc, chooseBestCanadianDocForUPC, 
 fetchBestDocForBarcode, makeBarcodeLockedCandidateFromDoc,  } from "./services/foodDetails.js";
@@ -446,6 +447,107 @@ app.patch("/users/:id/profile", async (req, res) => {
     return res.status(status).json({
       ok: false,
       error: err.message || "Failed to update user profile",
+    });
+  }
+});
+
+
+//--------------------------------------------------------------------------------------------------------
+// Daily Goals
+
+// GET /users/:id/daily-goals → returns dailyGoals for the user
+app.get("/users/:id/daily-goals", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const userId = String(req.params?.id || "").trim();
+    if (!userId || !ObjectId.isValid(userId)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing or invalid ':id' (userId).",
+      });
+    }
+
+    const dailyGoals = await getUserDailyGoals(db, userId);
+    if (!dailyGoals) {
+      return res.status(404).json({ ok: false, error: "User not found" });
+    }
+
+    return res.json({ ok: true, userId, dailyGoals });
+  } catch (err) {
+    console.error("[Users/DailyGoals/Get] Error:", err);
+    const status = err?.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err?.message || "Failed to fetch daily goals",
+    });
+  }
+});
+
+//------------------------------------------------------------------------------------------------------------
+
+// POST /users/:id/daily-goals/seed → seeds defaults from profile (age/sex); body: { force?: boolean }
+app.post("/users/:id/daily-goals/seed", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const userId = String(req.params?.id || "").trim();
+    if (!userId || !ObjectId.isValid(userId)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing or invalid ':id' (userId).",
+      });
+    }
+
+    const force = req.body?.force === true;
+    const result = await seedUserDailyGoals(db, userId, { force });
+    if (!result) {
+      return res.status(404).json({ ok: false, error: "User not found" });
+    }
+
+    return res.json({ ok: true, userId, dailyGoals: result.dailyGoals || {}, seeded: !!result.seeded });
+  } catch (err) {
+    console.error("[Users/DailyGoals/Seed] Error:", err);
+    const status = err?.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err?.message || "Failed to seed daily goals",
+    });
+  }
+});
+
+// PATCH /users/:id/daily-goals → patches one or more keys; body: { <nutrientKey>: number, ... }
+app.patch("/users/:id/daily-goals", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const userId = String(req.params?.id || "").trim();
+    if (!userId || !ObjectId.isValid(userId)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing or invalid ':id' (userId).",
+      });
+    }
+
+    const patch = (req.body && typeof req.body === "object") ? req.body : {};
+    const result = await patchUserDailyGoals(db, userId, patch);
+    if (!result) {
+      return res.status(404).json({ ok: false, error: "User not found" });
+    }
+
+    return res.json({ ok: true, userId, dailyGoals: result.dailyGoals || {} });
+  } catch (err) {
+    console.error("[Users/DailyGoals/Patch] Error:", err);
+    const status = err?.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err?.message || "Failed to update daily goals",
     });
   }
 });
@@ -2741,3 +2843,4 @@ process.on("SIGTERM", async () => {
     process.exit(0);
   }
 });
+
