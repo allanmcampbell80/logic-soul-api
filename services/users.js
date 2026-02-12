@@ -1376,10 +1376,14 @@ export async function seedUserDailyGoals(db, userId, options = {}) {
   }
 
   if (!force && user.dailyGoals && user.dailyGoals.goals) {
+    const defaults = buildDefaultDailyGoalsFromProfile({ age: user.age, gender: user.gender });
+    const effective = mergeDailyGoals(defaults, user.dailyGoals);
+
     return {
       ok: true,
       userId: cleanUserId,
       dailyGoals: user.dailyGoals,
+      effectiveDailyGoals: effective,
       seeded: false,
       reason: "already_exists",
     };
@@ -1413,7 +1417,7 @@ export async function seedUserDailyGoals(db, userId, options = {}) {
     ok: true,
     userId: cleanUserId,
     dailyGoals: result?.value?.dailyGoals ?? dailyGoals,
-    effectiveDailyGoals: effective,
+    effectiveDailyGoals: effective ?? mergeDailyGoals(defaults, result?.value?.dailyGoals ?? dailyGoals),
     seeded: true,
   };
 }
@@ -1483,10 +1487,16 @@ export async function patchUserDailyGoals(db, userId, updates, options = {}) {
     throw err;
   }
 
+  // Compute effective goals for client convenience (defaults merged with overrides)
+  const fullUser = await usersCollection.findOne(query, { projection: { dailyGoals: 1, age: 1, gender: 1 } });
+  const defaults = buildDefaultDailyGoalsFromProfile({ age: fullUser?.age, gender: fullUser?.gender });
+  const effective = mergeDailyGoals(defaults, fullUser?.dailyGoals ?? doc.dailyGoals);
+
   return {
     ok: true,
     userId: cleanUserId,
     updatedKeys: applied,
     dailyGoals: doc.dailyGoals ?? null,
+    effectiveDailyGoals: effective,
   };
 }
