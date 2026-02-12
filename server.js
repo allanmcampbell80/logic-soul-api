@@ -548,14 +548,23 @@ app.patch("/users/:id/daily-goals", async (req, res) => {
     }
 
     const patch = (req.body && typeof req.body === "object") ? req.body : {};
+
+    console.log("[Users/DailyGoals/Patch] userId=", userId);
+    console.log("[Users/DailyGoals/Patch] raw body=", JSON.stringify(req.body));
+    console.log("[Users/DailyGoals/Patch] patch keys=", Object.keys(patch));
+
     const result = await patchUserDailyGoals(db, userId, patch);
+
     if (!result) {
+      console.log("[Users/DailyGoals/Patch] result = null (User not found?)");
       return res.status(404).json({ ok: false, error: "User not found" });
     }
 
     const dailyGoals = result.dailyGoals || {};
     const effectiveDailyGoals = result.effectiveDailyGoals || dailyGoals || { goals: {} };
+
     return res.json({ ok: true, userId, dailyGoals, effectiveDailyGoals });
+
   } catch (err) {
     console.error("[Users/DailyGoals/Patch] Error:", err);
     const status = err?.statusCode || 500;
