@@ -365,7 +365,7 @@ function computeEventEffect(featureVals, eventFlags) {
 // Daily Roundup (Stage 1)
 // Goal: For each day, flag nutrients that are meaningfully under/over user daily targets.
 // DRI datasets live server-side so iOS and backend share one source of truth.
-import dri_v1 from "../datasets/dri_v1.js";
+import dri_v1 from "./dri/datasets/dri_v1.js";
 
 
 function defaultDailyGoals() {
