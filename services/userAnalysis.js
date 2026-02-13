@@ -129,6 +129,13 @@ function normalizeCandidate(c) {
   if (typeof c.bucket === "string" && c.bucket.trim()) extras.bucket = c.bucket.trim();
   if (typeof c.isTrustedDay === "boolean") extras.isTrustedDay = c.isTrustedDay;
 
+  // Optional: safety-limit context (helpful for UI and audits)
+  if (Number.isFinite(Number(c.lowerSafe))) extras.lowerSafe = Number(c.lowerSafe);
+  if (Number.isFinite(Number(c.upperSafe))) extras.upperSafe = Number(c.upperSafe);
+  if (Number.isFinite(Number(c.upperLimit))) extras.upperLimit = Number(c.upperLimit);
+  if (typeof c.unit === "string" && c.unit.trim()) extras.unit = c.unit.trim();
+  if (typeof c.referenceType === "string" && c.referenceType.trim()) extras.referenceType = c.referenceType.trim();
+
   return { ...base, ...extras };
 }
 
@@ -353,17 +360,17 @@ function computeEventEffect(featureVals, eventFlags) {
   return { nEvent: a.length, nNonEvent: b.length, meanEvent: ma, meanNonEvent: mb, strength: d, delta };
 }
 
+
 // ------------------------------------------------------------
 // Daily Roundup (Stage 1)
 // Goal: For each day, flag nutrients that are meaningfully under/over user daily targets.
-// Notes:
-// - Uses a simple completeness heuristic so "low" flags are not created on likely-incomplete days.
-// - Still records "over" flags even on low-calorie days when a nutrient is already near/over target.
-// - Stored as its own correlation pack with algorithmVersion `daily_roundup_v1`.
-// ------------------------------------------------------------
+// DRI datasets live server-side so iOS and backend share one source of truth.
+import dri_v1 from "../datasets/dri_v1.js";
+
 
 function defaultDailyGoals() {
-  // Conservative, general defaults. Later: move to user profile.
+  // Fallbacks if user profile or dataset resolution fails.
+  // Keep this conservative and stable.
   return {
     energy_kcal: 2000,
     protein_g: 50,
@@ -376,55 +383,180 @@ function defaultDailyGoals() {
   };
 }
 
-async function getDailyGoalsForUser(db, userIdRaw) {
-  // Best-effort: read from users.dailyGoals.goals; fallback to defaults.
+function normalizeSex(raw) {
+  const s = String(raw || "").trim().toLowerCase();
+  if (s === "male" || s === "m") return "male";
+  if (s === "female" || s === "f") return "female";
+  return null;
+}
+
+function normalizeAgeYears(raw) {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  // Clamp to a sane range.
+  return Math.max(0, Math.min(120, Math.floor(n)));
+}
+
+function loadDriDataset(profileKey) {
+  // For now we only have dri_v1, but keep the switch for future versions.
+  const key = String(profileKey || "").trim();
+  if (key === "dri_v1") return dri_v1;
+  return null;
+}
+
+function resolveGoalsFromDriBands(dataset, ageYears, sex) {
+  if (!dataset || !Array.isArray(dataset.bands)) return {};
+  const age = normalizeAgeYears(ageYears);
+  const sx = normalizeSex(sex);
+  if (age == null || !sx) return {};
+
+  // Build numeric goals map from the dataset's `recommended` values.
+  // (We use recommended as the daily goal; ranges/limits will be used later for "way under/over" buckets.)
+  const out = {};
+  for (const band of dataset.bands) {
+    if (!band || typeof band !== "object") continue;
+    if (String(band.sex || "").toLowerCase() !== sx) continue;
+
+    const minYears = normalizeAgeYears(band.minYears);
+    const maxYears = band.maxYears == null ? null : normalizeAgeYears(band.maxYears);
+    if (minYears == null) continue;
+    if (age < minYears) continue;
+    if (maxYears != null && age > maxYears) continue;
+
+    const nutrientKey = String(band.nutrientKey || "").trim();
+    if (!nutrientKey) continue;
+
+    const rec = typeof band.recommended === "number" ? band.recommended : Number(band.recommended);
+    if (!Number.isFinite(rec) || rec <= 0) continue;
+
+    out[nutrientKey] = rec;
+  }
+  return out;
+}
+
+function resolveBestBandsFromDri(dataset, ageYears, sex) {
+  // Returns map: nutrientKey -> best matching band (sex-specific preferred; falls back to sex:null).
+  if (!dataset || !Array.isArray(dataset.bands)) return {};
+
+  const age = normalizeAgeYears(ageYears);
+  const sx = normalizeSex(sex);
+  if (age == null) return {};
+
+  const out = {};
+
+  // Two-pass preference: (1) sex-specific, (2) sex-agnostic
+  const passes = [sx, null];
+
+  for (const passSex of passes) {
+    for (const band of dataset.bands) {
+      if (!band || typeof band !== "object") continue;
+
+      const bandSex = band.sex == null ? null : String(band.sex).toLowerCase();
+      if (passSex === null) {
+        if (bandSex !== null) continue;
+      } else {
+        if (!sx) continue;
+        if (bandSex !== sx) continue;
+      }
+
+      const minYears = normalizeAgeYears(band.minYears);
+      const maxYears = band.maxYears == null ? null : normalizeAgeYears(band.maxYears);
+      if (minYears == null) continue;
+      if (age < minYears) continue;
+      if (maxYears != null && age > maxYears) continue;
+
+      const nutrientKey = String(band.nutrientKey || "").trim();
+      if (!nutrientKey) continue;
+
+      // Only set if not already found in a more-preferred pass.
+      if (!(nutrientKey in out)) out[nutrientKey] = band;
+    }
+  }
+
+  return out;
+}
+
+async function getDailyTargetsForUser(db, userIdRaw) {
+  // Returns: { goals: { nutrientKey: number }, bands: { nutrientKey: bandObject }, meta: { profileKey, ageYears, sex } }
+  // Sources of truth (in order): DRI dataset resolved by age/sex/profileKey → user overrides → fallback defaults.
+
   const fallback = defaultDailyGoals();
 
   try {
-    if (!db) return fallback;
+    if (!db) return { goals: fallback, bands: {}, meta: { profileKey: "dri_v1", ageYears: null, sex: null } };
+
     const idStr = String(userIdRaw || "").trim();
-    if (!ObjectId.isValid(idStr)) return fallback;
+    if (!ObjectId.isValid(idStr)) return { goals: fallback, bands: {}, meta: { profileKey: "dri_v1", ageYears: null, sex: null } };
 
     const usersCol = db.collection("users");
     const u = await usersCol.findOne(
       { _id: new ObjectId(idStr) },
-      { projection: { dailyGoals: 1 } }
+      { projection: { age: 1, gender: 1, dailyGoals: 1 } }
     );
 
+    if (!u) return { goals: fallback, bands: {}, meta: { profileKey: "dri_v1", ageYears: null, sex: null } };
+
+    const ageYears = normalizeAgeYears(u.age);
+    const sex = normalizeSex(u.gender);
+
     const dg = u && typeof u.dailyGoals === "object" ? u.dailyGoals : null;
-    if (!dg) return fallback;
+    const profileKey = dg && typeof dg.profileKey === "string" ? dg.profileKey : "dri_v1";
 
-    // New shape (2026-02):
-    // dailyGoals: {
-    //   version: number,
-    //   profileKey: string,
-    //   source: string,
-    //   updatedAt: date,
-    //   goals: {
-    //     protein_g: { value: 100, unit: "g" },
-    //     vitamin_c_mg: { value: 100, unit: "mg" },
-    //     ...
-    //   }
-    // }
-    const goalsObj = dg && typeof dg.goals === "object" ? dg.goals : null;
-    if (!goalsObj) return fallback;
+    // 1) Resolve baseline goals + best-matching bands from dataset (if possible)
+    let baseline = {};
+    let bands = {};
 
-    // Merge user overrides on top of defaults; only keep finite positive numbers.
-    const merged = { ...fallback };
+    const dataset = loadDriDataset(profileKey);
+    if (dataset && ageYears != null) {
+      bands = resolveBestBandsFromDri(dataset, ageYears, sex);
 
-    for (const [k, v] of Object.entries(goalsObj)) {
-      // Accept either the new { value, unit } form or a legacy numeric value.
-      let raw = v;
-      if (raw && typeof raw === "object" && "value" in raw) raw = raw.value;
-
-      const n = typeof raw === "number" ? raw : Number(raw);
-      if (Number.isFinite(n) && n > 0) merged[k] = n;
+      // Build numeric goals map from the dataset's `recommended` values.
+      // If band has recommended <= 0, skip.
+      for (const [nutrientKey, band] of Object.entries(bands)) {
+        const rec = typeof band.recommended === "number" ? band.recommended : Number(band.recommended);
+        if (Number.isFinite(rec) && rec > 0) baseline[nutrientKey] = rec;
+      }
     }
 
-    return merged;
+    // 2) Start with fallback, then overlay baseline, then overlay user overrides
+    const merged = { ...fallback, ...baseline };
+
+    // 3) Apply user overrides from users.dailyGoals.goals
+    const goalsObj = dg && typeof dg.goals === "object" ? dg.goals : null;
+    if (goalsObj) {
+      for (const [k, v] of Object.entries(goalsObj)) {
+        // Accept either { value, unit } or raw numeric.
+        let raw = v;
+        if (raw && typeof raw === "object" && "value" in raw) raw = raw.value;
+
+        const n = typeof raw === "number" ? raw : Number(raw);
+        if (Number.isFinite(n) && n > 0) merged[k] = n;
+      }
+    }
+
+    // Make sure all values are finite positive numbers.
+    for (const [k, v] of Object.entries(merged)) {
+      const n = typeof v === "number" ? v : Number(v);
+      if (!Number.isFinite(n) || n <= 0) delete merged[k];
+      else merged[k] = n;
+    }
+
+    // Helpful debug breadcrumb (can be silenced later).
+    // eslint-disable-next-line no-console
+    console.log(
+      `[UserAnalysis/DailyRoundup] targets resolved profileKey=${profileKey} age=${ageYears ?? "?"} sex=${sex ?? "?"} mergedCount=${Object.keys(merged).length} bandCount=${Object.keys(bands).length}`
+    );
+
+    return { goals: merged, bands, meta: { profileKey, ageYears, sex } };
   } catch {
-    return fallback;
+    return { goals: fallback, bands: {}, meta: { profileKey: "dri_v1", ageYears: null, sex: null } };
   }
+}
+
+async function getDailyGoalsForUser(db, userIdRaw) {
+  // Backwards-compatible wrapper: returns just the numeric goals map.
+  const t = await getDailyTargetsForUser(db, userIdRaw);
+  return t && typeof t === "object" && t.goals ? t.goals : defaultDailyGoals();
 }
 
 function computeEnergyCoverage(totals, totalsEstimated, energyGoal) {
@@ -439,9 +571,10 @@ function computeEnergyCoverage(totals, totalsEstimated, energyGoal) {
   return { energyLogged, coverage: clamp(coverage, 0, 3) };
 }
 
-function buildDailyRoundupCandidatesForDay(dayDoc, goals) {
+function buildDailyRoundupCandidatesForDay(dayDoc, goals, bandsByKey = null) {
   const totals = dayDoc && typeof dayDoc.totals === "object" ? dayDoc.totals : {};
   const totalsEstimated = dayDoc && typeof dayDoc.totals_estimated === "object" ? dayDoc.totals_estimated : {};
+  const bands = bandsByKey && typeof bandsByKey === "object" ? bandsByKey : {};
 
   const goalEnergy = isFiniteNumber(goals?.energy_kcal) ? goals.energy_kcal : 2000;
   const { energyLogged, coverage } = computeEnergyCoverage(totals, totalsEstimated, goalEnergy);
@@ -476,12 +609,34 @@ function buildDailyRoundupCandidatesForDay(dayDoc, goals) {
     if (pctGoal == null || !Number.isFinite(pctGoal)) continue;
 
     // Decide whether to record an event.
-    // - Record LOW only if trusted day.
-    // - Record HIGH always if pct >= 1.0 (OVER_ANYWAY_PCT), or if trusted and pct >= 1.2.
+    // Priority order:
+    // 1) Over UL (upperLimit)  -> bucket=over_limit
+    // 2) Over safe (upperSafe) -> bucket=over_safe
+    // 3) Met/exceeded recommended -> bucket=met
+    // 4) Under target (trusted days only) -> bucket=low
+    // 5) Over target meaningfully -> bucket=high (legacy percent thresholds)
+
+    const band = bands && nutrKey in bands ? bands[nutrKey] : null;
+    const upperLimit = band && band.upperLimit != null ? Number(band.upperLimit) : null;
+    const upperSafe = band && band.upperSafe != null ? Number(band.upperSafe) : null;
+    const lowerSafe = band && band.lowerSafe != null ? Number(band.lowerSafe) : null;
+    const unit = band && typeof band.unit === "string" ? band.unit : undefined;
+    const referenceType = band && typeof band.referenceType === "string" ? band.referenceType : undefined;
+
     let bucket = "ok";
     let shouldRecord = false;
 
-    if (pctGoal < LOW_PCT) {
+    if (upperLimit != null && Number.isFinite(upperLimit) && actual > upperLimit) {
+      bucket = "over_limit";
+      shouldRecord = true;
+    } else if (upperSafe != null && Number.isFinite(upperSafe) && actual > upperSafe) {
+      bucket = "over_safe";
+      shouldRecord = true;
+    } else if (actual >= goalVal) {
+      // Explicitly store “met/exceeded recommended” so the UI can celebrate/track
+      bucket = "met";
+      shouldRecord = true;
+    } else if (pctGoal < LOW_PCT) {
       bucket = "low";
       shouldRecord = isTrustedDay; // only trust lows on complete-ish days
     } else if (pctGoal >= HIGH_PCT) {
@@ -510,6 +665,12 @@ function buildDailyRoundupCandidatesForDay(dayDoc, goals) {
       coverage,
       bucket,
       isTrustedDay,
+      // optional DRI context
+      ...(lowerSafe != null && Number.isFinite(lowerSafe) ? { lowerSafe } : {}),
+      ...(upperSafe != null && Number.isFinite(upperSafe) ? { upperSafe } : {}),
+      ...(upperLimit != null && Number.isFinite(upperLimit) ? { upperLimit } : {}),
+      ...(unit ? { unit } : {}),
+      ...(referenceType ? { referenceType } : {}),
     });
   }
 
@@ -581,11 +742,11 @@ function buildDailyRoundupCandidatesForDay(dayDoc, goals) {
   return { candidates, coverage, isTrustedDay, energyLogged };
 }
 
-async function storeDailyRoundupPack(db, userId, dayDoc, goals) {
+async function storeDailyRoundupPack(db, userId, dayDoc, goals, bandsByKey = null) {
   const dateKey = typeof dayDoc?.dateKey === "string" ? dayDoc.dateKey : null;
   if (!dateKey) return { storedCount: 0, dateKey: null };
 
-  const { candidates } = buildDailyRoundupCandidatesForDay(dayDoc, goals);
+  const { candidates } = buildDailyRoundupCandidatesForDay(dayDoc, goals, bandsByKey);
 
   const payload = {
     userId: String(userId),
@@ -633,14 +794,16 @@ export async function runCorrelationEngineForUser(db, options) {
   sliced.sort((a, b) => (a.dateKey < b.dateKey ? -1 : a.dateKey > b.dateKey ? 1 : 0));
 
   // Stage 1: Daily roundup (always write)
-  const goals = await getDailyGoalsForUser(db, userId);
+  const targets = await getDailyTargetsForUser(db, userId);
+  const goals = targets && targets.goals ? targets.goals : await getDailyGoalsForUser(db, userId);
+  const bandsByKey = targets && targets.bands ? targets.bands : null;
 
   // Store roundup for the latest available day in the slice
   let roundupStoredCount = 0;
   let roundupDateKey = null;
   if (sliced.length > 0) {
     const latestDay = sliced[sliced.length - 1];
-    const roundupStored = await storeDailyRoundupPack(db, userId, latestDay, goals);
+    const roundupStored = await storeDailyRoundupPack(db, userId, latestDay, goals, bandsByKey);
     roundupStoredCount = roundupStored?.storedCount ?? 0;
     roundupDateKey = roundupStored?.dateKey ?? null;
   }
@@ -649,7 +812,7 @@ export async function runCorrelationEngineForUser(db, options) {
   let roundupBackfilledDays = 0;
   if (options?.backfillRoundups === true) {
     for (const d of sliced) {
-      const r = await storeDailyRoundupPack(db, userId, d, goals);
+      const r = await storeDailyRoundupPack(db, userId, d, goals, bandsByKey);
       if ((r?.storedCount ?? 0) >= 0) roundupBackfilledDays += 1;
     }
   }
