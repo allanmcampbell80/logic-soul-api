@@ -167,3 +167,12 @@ export const driV1Bands = [
     source: "DRI",
   },
 ];
+
+// Default export for consumers that `import dri_v1 from ...`
+const dri_v1 = {
+  profileKey: DRI_V1_PROFILE_KEY,
+  version: DRI_V1_VERSION,
+  bands: driV1Bands,
+};
+
+export default dri_v1;
