@@ -1130,3 +1130,5 @@ export async function runCorrelationEngineAndPromoteForUser(db, options) {
 
   return { ...result, promotedCount: promoted?.newlySurfacedCount ?? 0 };
 }
+  return { ...result, promotedCount: promoted?.newlySurfacedCount ?? 0 };
+}
