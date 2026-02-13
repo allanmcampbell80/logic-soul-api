@@ -559,6 +559,7 @@ async function getDailyGoalsForUser(db, userIdRaw) {
   return t && typeof t === "object" && t.goals ? t.goals : defaultDailyGoals();
 }
 
+
 function computeEnergyCoverage(totals, totalsEstimated, energyGoal) {
   const t = totals && typeof totals === "object" ? totals : {};
   const e = totalsEstimated && typeof totalsEstimated === "object" ? totalsEstimated : {};
@@ -571,9 +572,87 @@ function computeEnergyCoverage(totals, totalsEstimated, energyGoal) {
   return { energyLogged, coverage: clamp(coverage, 0, 3) };
 }
 
+// --- Nutrient alias normalization helpers ---
+function canonicalizeNutrientKey(k) {
+  const key = String(k || "").trim();
+  if (!key) return "";
+
+  // Exact alias map (keep this small and explicit).
+  // Canonical keys should match the `_g/_mg/_ug` convention used by totals + DRI bands.
+  const ALIASES = {
+    // legacy / alternate spellings
+    protein: "protein_g",
+    carbohydrate: "carbs_g",
+    carbs: "carbs_g",
+    fat: "fat_g",
+    sugars: "sugars_g",
+    fiber: "fiber_g",
+    water: "water_g",
+
+    // common database variants
+    energy: "energy_kcal",
+    calories: "energy_kcal",
+    kcal: "energy_kcal",
+    kj: "energy_kj",
+
+    // saturated fat variants
+    saturated_fat_g: "sat_fat_g",
+    saturated_fat: "sat_fat_g",
+    sat_fat: "sat_fat_g",
+
+    // sodium variants
+    sodium: "sodium_mg",
+
+    // caffeine variants
+    caffeine: "caffeine_mg",
+
+    // added sugars variants (prefer added_sugars_g)
+    added_sugars: "added_sugars_g",
+  };
+
+  const lower = key.toLowerCase();
+  return ALIASES[lower] || key;
+}
+
+function normalizeTotalsKeys(totalsIn) {
+  const t = totalsIn && typeof totalsIn === "object" ? totalsIn : {};
+  const out = {};
+
+  for (const [rawKey, rawVal] of Object.entries(t)) {
+    const key = canonicalizeNutrientKey(rawKey);
+    if (!key) continue;
+
+    const n = typeof rawVal === "number" ? rawVal : Number(rawVal);
+    if (!Number.isFinite(n)) continue;
+
+    // Merge duplicates by summing (safe for aliases; prevents losing signal)
+    out[key] = (out[key] || 0) + n;
+  }
+
+  return out;
+}
+
+function normalizeTotalsAndEstimatedKeys(totals, totalsEstimated) {
+  return {
+    totals: normalizeTotalsKeys(totals),
+    totalsEstimated: normalizeTotalsKeys(totalsEstimated),
+  };
+}
+
 function buildDailyRoundupCandidatesForDay(dayDoc, goals, bandsByKey = null) {
-  const totals = dayDoc && typeof dayDoc.totals === "object" ? dayDoc.totals : {};
-  const totalsEstimated = dayDoc && typeof dayDoc.totals_estimated === "object" ? dayDoc.totals_estimated : {};
+  const rawTotals = dayDoc && typeof dayDoc.totals === "object" ? dayDoc.totals : {};
+  const rawTotalsEstimated = dayDoc && typeof dayDoc.totals_estimated === "object" ? dayDoc.totals_estimated : {};
+
+  // Normalize alias keys up-front so we don't generate duplicate/zero candidates
+  // like `protein` alongside `protein_g`.
+  const normalized = normalizeTotalsAndEstimatedKeys(rawTotals, rawTotalsEstimated);
+  const totals = normalized.totals;
+  const totalsEstimated = normalized.totalsEstimated;
+  // eslint-disable-next-line no-console
+  console.log(
+    `[UserAnalysis/DailyRoundup] totals normalized keys sample=` +
+      JSON.stringify(Object.keys(totals).filter((k) => k === "protein" || k === "protein_g" || k === "carbohydrate" || k === "carbs_g"))
+  );
   const bands = bandsByKey && typeof bandsByKey === "object" ? bandsByKey : {};
 
   const goalEnergy = isFiniteNumber(goals?.energy_kcal) ? goals.energy_kcal : 2000;
