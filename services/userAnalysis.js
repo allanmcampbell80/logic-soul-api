@@ -1117,18 +1117,16 @@ export async function runCorrelationEngineAndPromoteForUser(db, options) {
 
   // If there are no candidates (or not enough days), nothing to promote.
   const candidates = Array.isArray(result?.top) ? result.top : [];
-  if (!candidates.length) {
+  if (candidates.length === 0) {
     return { ...result, promotedCount: 0 };
   }
 
   const promoted = await promoteCorrelationCandidates(db, {
     userId: String(options?.userId || "").trim(),
-    dateKey: result.dateKey,
+    dateKey: result?.dateKey || null,
     candidates,
-    lagDays: result.lagDays,
+    lagDays: result?.lagDays,
   });
 
-  return { ...result, promotedCount: promoted?.newlySurfacedCount ?? 0 };
-}
   return { ...result, promotedCount: promoted?.newlySurfacedCount ?? 0 };
 }
