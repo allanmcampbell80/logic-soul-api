@@ -670,11 +670,29 @@ function buildDailyRoundupCandidatesForDay(dayDoc, goals, bandsByKey = null) {
 
   const candidates = [];
 
-  // Evaluate every goal key that exists in totals.
-  const goalEntries = goals && typeof goals === "object" ? Object.entries(goals) : [];
-  for (const [nutrKey, goalValRaw] of goalEntries) {
-    const goalVal = typeof goalValRaw === "number" ? goalValRaw : Number(goalValRaw);
-    if (!Number.isFinite(goalVal) || goalVal <= 0) continue;
+  // Evaluate:
+  // 1) any nutrient with a numeric goal (recommended / user override / fallback), and
+  // 2) any nutrient that has a safety cap (upperSafe/upperLimit) even if it has no recommended goal.
+  const goalMap = goals && typeof goals === "object" ? goals : {};
+
+  const keysToEvaluate = new Set(Object.keys(goalMap));
+  if (bands && typeof bands === "object") {
+    for (const [k, b] of Object.entries(bands)) {
+      if (!b || typeof b !== "object") continue;
+      const us = b.upperSafe != null ? Number(b.upperSafe) : null;
+      const ul = b.upperLimit != null ? Number(b.upperLimit) : null;
+      if ((us != null && Number.isFinite(us)) || (ul != null && Number.isFinite(ul))) {
+        keysToEvaluate.add(k);
+      }
+    }
+  }
+
+  for (const nutrKey of Array.from(keysToEvaluate)) {
+    const goalValRaw = goalMap[nutrKey];
+    // Goal can be missing for "cap-only" nutrients (e.g., informational or limit-based tracking).
+    // In that case we only allow over_safe / over_limit events using the cap as the comparison goal.
+    const parsedGoal = typeof goalValRaw === "number" ? goalValRaw : Number(goalValRaw);
+    const hasNumericGoal = Number.isFinite(parsedGoal) && parsedGoal > 0;
 
     // Pull actual from totals + estimated. (Estimated is additive, same as energy.)
     const actual =
@@ -684,23 +702,31 @@ function buildDailyRoundupCandidatesForDay(dayDoc, goals, bandsByKey = null) {
     // If there's truly no signal at all, skip.
     if (!Number.isFinite(actual)) continue;
 
-    const pctGoal = goalVal > 0 ? actual / goalVal : null;
-    if (pctGoal == null || !Number.isFinite(pctGoal)) continue;
-
-    // Decide whether to record an event.
-    // Priority order:
-    // 1) Over UL (upperLimit)  -> bucket=over_limit
-    // 2) Over safe (upperSafe) -> bucket=over_safe
-    // 3) Met/exceeded recommended -> bucket=met
-    // 4) Under target (trusted days only) -> bucket=low
-    // 5) Over target meaningfully -> bucket=high (legacy percent thresholds)
-
+    // Resolve band + caps for this nutrient.
     const band = bands && nutrKey in bands ? bands[nutrKey] : null;
     const upperLimit = band && band.upperLimit != null ? Number(band.upperLimit) : null;
     const upperSafe = band && band.upperSafe != null ? Number(band.upperSafe) : null;
     const lowerSafe = band && band.lowerSafe != null ? Number(band.lowerSafe) : null;
     const unit = band && typeof band.unit === "string" ? band.unit : undefined;
     const referenceType = band && typeof band.referenceType === "string" ? band.referenceType : undefined;
+
+    const hasUpperLimit = upperLimit != null && Number.isFinite(upperLimit);
+    const hasUpperSafe = upperSafe != null && Number.isFinite(upperSafe);
+
+    // If we have a numeric goal, use it. Otherwise, for cap-only nutrients, use upperSafe/upperLimit as the comparison goal.
+    const goalVal = hasNumericGoal
+      ? parsedGoal
+      : (hasUpperSafe ? upperSafe : (hasUpperLimit ? upperLimit : null));
+
+    if (goalVal == null || !Number.isFinite(goalVal) || goalVal <= 0) {
+      // Nothing to compare against.
+      continue;
+    }
+
+    const pctGoal = goalVal > 0 ? actual / goalVal : null;
+    if (pctGoal == null || !Number.isFinite(pctGoal)) continue;
+
+    const isCapOnly = !hasNumericGoal && (hasUpperSafe || hasUpperLimit);
 
     let bucket = "ok";
     let shouldRecord = false;
@@ -711,17 +737,17 @@ function buildDailyRoundupCandidatesForDay(dayDoc, goals, bandsByKey = null) {
     } else if (upperSafe != null && Number.isFinite(upperSafe) && actual > upperSafe) {
       bucket = "over_safe";
       shouldRecord = true;
-    } else if (actual >= goalVal) {
+    } else if (!isCapOnly && actual >= goalVal) {
       // Explicitly store “met/exceeded recommended” so the UI can celebrate/track
       bucket = "met";
       shouldRecord = true;
-    } else if (pctGoal < LOW_PCT) {
+    } else if (!isCapOnly && pctGoal < LOW_PCT) {
       bucket = "low";
       shouldRecord = isTrustedDay; // only trust lows on complete-ish days
-    } else if (pctGoal >= HIGH_PCT) {
+    } else if (!isCapOnly && pctGoal >= HIGH_PCT) {
       bucket = "high";
       shouldRecord = true;
-    } else if (pctGoal >= OVER_ANYWAY_PCT && !isTrustedDay) {
+    } else if (!isCapOnly && pctGoal >= OVER_ANYWAY_PCT && !isTrustedDay) {
       bucket = "high";
       shouldRecord = true;
     }
