@@ -739,3 +739,223 @@ export function makeBarcodeLockedCandidateFromDoc(doc, barcode16) {
     usdaEquivalentFoodId: doc.usdaEquivalentFoodId ?? doc.usda_equivalent_food_id ?? null,
   };
 }
+
+// --- Ingredient-based micronutrient estimation (best-effort, never overwrites) ---
+
+function normalizeIngredientKey(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, " ") // remove parentheticals
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isFiniteNumber(x) {
+  return typeof x === "number" && Number.isFinite(x);
+}
+
+function roundSmart(v) {
+  if (!isFiniteNumber(v)) return v;
+  if (Math.abs(v) >= 100) return Math.round(v * 10) / 10;
+  if (Math.abs(v) >= 10) return Math.round(v * 100) / 100;
+  return Math.round(v * 1000) / 1000;
+}
+
+function buildExistingKeySet(nutrients) {
+  const s = new Set();
+  for (const n of Array.isArray(nutrients) ? nutrients : []) {
+    const k = n?.key;
+    if (k) s.add(String(k));
+  }
+  return s;
+}
+
+function hasExistingIngredientEstimate(nutrients) {
+  for (const n of Array.isArray(nutrients) ? nutrients : []) {
+    if (n?.source === "ingredients_estimate" || n?.data_quality === "ingredients_estimate_v1") return true;
+  }
+  return false;
+}
+
+async function findSimpleIngredientDoc(db, foodsCol, ingredientName, cache) {
+  const norm = normalizeIngredientKey(ingredientName);
+  if (!norm) return null;
+  if (cache.has(norm)) return cache.get(norm);
+
+  // Try exact normalized_name match first.
+  let doc = await foodsCol.findOne(
+    {
+      ...notIgnoredQuery(),
+      is_simple_ingredient: true,
+      $or: [{ normalized_name: norm }, { normalized_common_name: norm }, { normalized_alt_names: norm }],
+    },
+    { projection: { _id: 1, name: 1, normalized_name: 1, nutrients: 1 } }
+  );
+
+  // If no direct hit, try a light regex on normalized_alt_names/common_name to catch minor variations.
+  if (!doc) {
+    const rx = new RegExp(`^${norm.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}$`, "i");
+    doc = await foodsCol.findOne(
+      {
+        ...notIgnoredQuery(),
+        is_simple_ingredient: true,
+        $or: [{ normalized_name: rx }, { normalized_common_name: rx }, { normalized_alt_names: rx }],
+      },
+      { projection: { _id: 1, name: 1, normalized_name: 1, nutrients: 1 } }
+    );
+  }
+
+  cache.set(norm, doc || null);
+  return doc || null;
+}
+
+/**
+ * Best-effort: estimate missing micronutrients from `ingredients_amounts_estimate_v1`.
+ * - NEVER overwrites existing nutrient keys.
+ * - Adds only new keys as `source: ingredients_estimate`, `data_quality: ingredients_estimate_v1`.
+ * - Skips when non-food suspected.
+ *
+ * Usage: call after inserting a user-enriched product.
+ *
+ * @param {import("mongodb").Db} db
+ * @param {string|import("mongodb").ObjectId} foodId Mongo _id of the food doc to enrich
+ * @returns {Promise<{ok:boolean, added:number, id:string}>}
+ */
+export async function applyIngredientMicronutrientEstimates(db, foodId) {
+  const foodsCol = db.collection(process.env.MONGODB_COLLECTION_FOODS);
+
+  if (!foodId || !ObjectId.isValid(String(foodId))) {
+    return { ok: false, added: 0, id: String(foodId || "") };
+  }
+
+  const _id = new ObjectId(String(foodId));
+
+  const doc = await foodsCol.findOne(
+    { _id, ...notIgnoredQuery() },
+    {
+      projection: {
+        nutrients: 1,
+        ingredients_amounts_estimate_v1: 1,
+        ingredients_parsed: 1,
+        health_flags: 1,
+      },
+    }
+  );
+
+  if (!doc) return { ok: false, added: 0, id: String(foodId) };
+
+  const hf = doc.health_flags && typeof doc.health_flags === "object" ? doc.health_flags : null;
+  const nonFood = hf && (hf.non_food_suspected === true || hf.nonFoodSuspected === true);
+  if (nonFood) return { ok: true, added: 0, id: String(foodId) };
+
+  // Require structured estimate.
+  const est = doc.ingredients_amounts_estimate_v1;
+  const items = est && Array.isArray(est.items) ? est.items : null;
+  if (!items || items.length === 0) return { ok: true, added: 0, id: String(foodId) };
+
+  const baseNutrients = Array.isArray(doc.nutrients) ? doc.nutrients : [];
+
+  // Prevent double-application.
+  if (hasExistingIngredientEstimate(baseNutrients)) {
+    return { ok: true, added: 0, id: String(foodId) };
+  }
+
+  const existingKeys = buildExistingKeySet(baseNutrients);
+
+  // Accumulate contributions by key.
+  const acc = new Map(); // key -> { unit, display_name, value, confSum, weightSum }
+
+  const cache = new Map();
+
+  for (const it of items) {
+    const name = typeof it?.name === "string" ? it.name.trim() : "";
+    const g = typeof it?.g === "number" && Number.isFinite(it.g) ? it.g : null;
+    if (!name || g == null || g <= 0) continue;
+
+    const frac = g / 100.0;
+    const ingConf = typeof it?.confidence === "number" && Number.isFinite(it.confidence) ? it.confidence : 0.25;
+
+    const ingDoc = await findSimpleIngredientDoc(db, foodsCol, name, cache);
+    if (!ingDoc || !Array.isArray(ingDoc.nutrients) || ingDoc.nutrients.length === 0) continue;
+
+    for (const n of ingDoc.nutrients) {
+      const key = n?.key ? String(n.key) : null;
+      if (!key) continue;
+      if (existingKeys.has(key)) continue; // never overwrite
+
+      const per100g = n?.per_100g;
+      if (!isFiniteNumber(per100g) || per100g === 0) continue;
+
+      const unit = n?.unit || null;
+      const display_name = n?.display_name || null;
+
+      const add = per100g * frac;
+
+      const prev = acc.get(key) || {
+        unit,
+        display_name,
+        value: 0,
+        confSum: 0,
+        weightSum: 0,
+      };
+
+      // If units mismatch across ingredients, skip accumulating that key to avoid bad merges.
+      if (prev.unit && unit && String(prev.unit) !== String(unit)) {
+        continue;
+      }
+
+      prev.value += add;
+      prev.confSum += ingConf * frac;
+      prev.weightSum += frac;
+      if (!prev.unit) prev.unit = unit;
+      if (!prev.display_name) prev.display_name = display_name;
+      acc.set(key, prev);
+    }
+  }
+
+  if (acc.size === 0) return { ok: true, added: 0, id: String(foodId) };
+
+  const newNutrients = [];
+  for (const [key, v] of acc.entries()) {
+    const per_100g = roundSmart(v.value);
+    if (!isFiniteNumber(per_100g) || per_100g === 0) continue;
+
+    // Low-confidence estimate; scale by average ingredient confidence contribution.
+    const avgConf = v.weightSum > 0 ? v.confSum / v.weightSum : 0.2;
+    const confidence = Math.max(0.05, Math.min(0.35, avgConf * 0.6));
+
+    newNutrients.push({
+      key,
+      display_name: v.display_name || key,
+      unit: v.unit || null,
+      per_100g,
+      per_serving: null,
+      source: "ingredients_estimate",
+      data_quality: "ingredients_estimate_v1",
+      confidence,
+      is_estimated: true,
+    });
+  }
+
+  if (newNutrients.length === 0) return { ok: true, added: 0, id: String(foodId) };
+
+  const merged = [...baseNutrients, ...newNutrients];
+
+  await foodsCol.updateOne(
+    { _id },
+    {
+      $set: {
+        nutrients: merged,
+        ingredient_micros_estimation_meta: {
+          version: 1,
+          method: "ingredients_amounts_estimate_v1",
+          applied_at: new Date(),
+          note: "Estimated missing nutrient keys from simple-ingredient lab profiles. Never overwrites existing keys.",
+        },
+      },
+    }
+  );
+
+  return { ok: true, added: newNutrients.length, id: String(foodId) };
+}
