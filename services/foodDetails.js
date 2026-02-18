@@ -727,6 +727,20 @@ export function makeBarcodeLockedCandidateFromDoc(doc, barcode16) {
   const name = doc.display_product_name || doc.common_name || doc.name || "";
   const brandName = (doc.brand && (doc.brand.name || doc.brand.owner)) || null;
 
+  // Preparation support (e.g. condensed soup "prepared" vs "condensed")
+  const preparedVolumeMultiplier =
+    (doc?.serving_info && (doc.serving_info.prepared_volume_multiplier ?? doc.serving_info.preparedVolumeMultiplier)) ??
+    (doc?.servingInfo && (doc.servingInfo.prepared_volume_multiplier ?? doc.servingInfo.preparedVolumeMultiplier)) ??
+    null;
+  const preparedVolumeMultiplierSource =
+    (doc?.serving_info && (doc.serving_info.prepared_volume_multiplier_source ?? doc.serving_info.preparedVolumeMultiplierSource)) ??
+    (doc?.servingInfo && (doc.servingInfo.prepared_volume_multiplier_source ?? doc.servingInfo.preparedVolumeMultiplierSource)) ??
+    null;
+  const preparedHouseholdServingFullText =
+    (doc?.serving_info && (doc.serving_info.prepared_household_serving_full_text ?? doc.serving_info.preparedHouseholdServingFullText)) ??
+    (doc?.servingInfo && (doc.servingInfo.prepared_household_serving_full_text ?? doc.servingInfo.preparedHouseholdServingFullText)) ??
+    null;
+
   return {
     id: doc._id ? String(doc._id) : null,
     name,
@@ -744,6 +758,22 @@ export function makeBarcodeLockedCandidateFromDoc(doc, barcode16) {
     usda_equivalent: doc.usda_equivalent ?? null,
     usda_equivalent_food_id: doc.usda_equivalent_food_id ?? doc.usdaEquivalentFoodId ?? null,
     usdaEquivalentFoodId: doc.usdaEquivalentFoodId ?? doc.usda_equivalent_food_id ?? null,
+
+    // Prep multiplier hints for clients
+    prepared_volume_multiplier: preparedVolumeMultiplier,
+    preparedVolumeMultiplier,
+
+    // Also include a minimal serving_info/servingInfo payload so clients can look in either place
+    serving_info: {
+      prepared_volume_multiplier: preparedVolumeMultiplier,
+      prepared_volume_multiplier_source: preparedVolumeMultiplierSource,
+      prepared_household_serving_full_text: preparedHouseholdServingFullText,
+    },
+    servingInfo: {
+      preparedVolumeMultiplier: preparedVolumeMultiplier,
+      preparedVolumeMultiplierSource: preparedVolumeMultiplierSource,
+      preparedHouseholdServingFullText: preparedHouseholdServingFullText,
+    },
   };
 }
 
@@ -844,6 +874,7 @@ export async function applyIngredientMicronutrientEstimates(db, foodId) {
       projection: {
         nutrients: 1,
         ingredients_amounts_estimate_v1: 1,
+        ingredients_amounts_estimation_meta: 1,
         ingredients_parsed: 1,
         health_flags: 1,
       },
@@ -856,8 +887,48 @@ export async function applyIngredientMicronutrientEstimates(db, foodId) {
   const nonFood = hf && (hf.non_food_suspected === true || hf.nonFoodSuspected === true);
   if (nonFood) return { ok: true, added: 0, id: String(foodId) };
 
-  // Require structured estimate.
-  const est = doc.ingredients_amounts_estimate_v1;
+  // Require a structured estimate.
+  // Primary: top-level `ingredients_amounts_estimate_v1`.
+  // Fallback: parse `health_flags.ingredients_amounts_estimate_v1` if it exists as a JSON string.
+  let est = doc.ingredients_amounts_estimate_v1;
+
+  if (!est || !Array.isArray(est.items) || est.items.length === 0) {
+    const hfStr = doc?.health_flags?.ingredients_amounts_estimate_v1;
+    if (typeof hfStr === "string" && hfStr.trim().startsWith("{") && hfStr.includes("\"items\"")) {
+      try {
+        const parsed = JSON.parse(hfStr);
+        if (parsed && typeof parsed === "object" && Array.isArray(parsed.items) && parsed.items.length > 0) {
+          est = parsed;
+
+          // Best-effort: persist parsed estimate onto the doc so future calls are fast and consistent.
+          // Only do this if the doc doesn't already have a parsed estimate/meta.
+          if (!doc.ingredients_amounts_estimate_v1 && !doc.ingredients_amounts_estimation_meta) {
+            try {
+              await foodsCol.updateOne(
+                { _id },
+                {
+                  $set: {
+                    ingredients_amounts_estimate_v1: parsed,
+                    ingredients_amounts_estimation_meta: {
+                      version: 1,
+                      parsed_at: new Date(),
+                      source: "gpt",
+                      note: "Low-confidence ingredient grams-per-100g estimate parsed from health_flags.ingredients_amounts_estimate_v1",
+                    },
+                  },
+                }
+              );
+            } catch (persistErr) {
+              console.error("[IngredientEstimate] Failed to persist parsed ingredients_amounts_estimate_v1 (best-effort):", persistErr);
+            }
+          }
+        }
+      } catch {
+        // ignore parse errors
+      }
+    }
+  }
+
   const items = est && Array.isArray(est.items) ? est.items : null;
   if (!items || items.length === 0) return { ok: true, added: 0, id: String(foodId) };
 
