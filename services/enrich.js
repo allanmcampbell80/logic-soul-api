@@ -240,11 +240,18 @@ export async function buildUserEnrichedDoc(payload, headers, db) {
 // Simple ingredients live in the same collection as docs with:
 //   type: "ingredient", is_simple_ingredient: true
 export async function ensureSimpleIngredientsFromParsedList(
+  db,
   ingredientsParsed,
   normalizedUPC16,
   sourceTag
 ) {
-  if (!collection) return;
+  if (!db) return;
+  const foodsCollectionName =
+    process.env.MONGODB_COLLECTION_FOODS ||
+    process.env.MONGODB_COLLECTION_FOOD_ITEMS ||
+    "food_items";
+  const collection = db.collection(foodsCollectionName);
+
   if (!Array.isArray(ingredientsParsed) || ingredientsParsed.length === 0) return;
 
   const now = new Date();
