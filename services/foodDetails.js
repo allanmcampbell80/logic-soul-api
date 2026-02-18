@@ -966,6 +966,3 @@ export async function applyIngredientMicronutrientEstimates(db, foodId) {
 
   return { ok: true, added: newNutrients.length, id: String(foodId) };
 }
-
-  return { ok: true, added: newNutrients.length, id: String(foodId) };
-}
