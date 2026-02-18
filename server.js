@@ -1920,6 +1920,7 @@ app.post("/foods/user-enriched", async (req, res) => {
     ) {
       try {
         await ensureSimpleIngredientsFromParsedList(
+          db,
           docToInsert.ingredients_parsed,
           docToInsert.normalized_upc_16 || docToInsert.normalized_upc || null,
           "user_enriched_canadian_product"
@@ -2007,6 +2008,7 @@ app.post("/user-enriched-food-item", async (req, res) => {
     ) {
       try {
         await ensureSimpleIngredientsFromParsedList(
+          db,
           docToInsert.ingredients_parsed,
           docToInsert.normalized_upc_16 || docToInsert.normalized_upc || null,
           "user_enriched_canadian_product"
@@ -2981,4 +2983,3 @@ process.on("SIGTERM", async () => {
     process.exit(0);
   }
 });
-
