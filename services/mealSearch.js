@@ -952,6 +952,17 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
           restaurant_chain: c.doc.restaurant_chain || null,
           brand: c.doc.brand || null,
           food_type: c.doc.food_type || null,
+          // Preparation toggle support (e.g., condensed -> prepared soups)
+          serving_info: c.doc.serving_info || null,
+          servingInfo: c.doc.serving_info || null,
+          prepared_volume_multiplier:
+            (c.doc.serving_info && c.doc.serving_info.prepared_volume_multiplier != null)
+              ? c.doc.serving_info.prepared_volume_multiplier
+              : null,
+          preparedVolumeMultiplier:
+            (c.doc.serving_info && c.doc.serving_info.prepared_volume_multiplier != null)
+              ? c.doc.serving_info.prepared_volume_multiplier
+              : null,
           is_favorite: favoriteIdSet.has(String(c.doc._id)),
           favorite_rank: favoriteRankById[String(c.doc._id)] || 0,
           favorite_added_at: favoriteMeta[String(c.doc._id)] ? new Date(favoriteMeta[String(c.doc._id)]).toISOString() : null,
@@ -1043,6 +1054,17 @@ export async function findBestMatchesForMealItems(db, parsedMeal, options = {}) 
         restaurant_chain: c.doc.restaurant_chain || null,
         brand: c.doc.brand || null,
         food_type: c.doc.food_type || null,
+        // Preparation toggle support (e.g., condensed -> prepared soups)
+        serving_info: c.doc.serving_info || null,
+        servingInfo: c.doc.serving_info || null,
+        prepared_volume_multiplier:
+          (c.doc.serving_info && c.doc.serving_info.prepared_volume_multiplier != null)
+            ? c.doc.serving_info.prepared_volume_multiplier
+            : null,
+        preparedVolumeMultiplier:
+          (c.doc.serving_info && c.doc.serving_info.prepared_volume_multiplier != null)
+            ? c.doc.serving_info.prepared_volume_multiplier
+            : null,
         is_favorite: favoriteIdSet.has(String(c.doc._id)),
         favorite_rank: favoriteRankById[String(c.doc._id)] || 0,
         favorite_added_at: favoriteMeta[String(c.doc._id)] ? new Date(favoriteMeta[String(c.doc._id)]).toISOString() : null,
