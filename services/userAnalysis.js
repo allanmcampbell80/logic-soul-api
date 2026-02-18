@@ -1,6 +1,7 @@
 // userAnalysis.js
 
 import { ObjectId } from "mongodb";
+import { coerceUserIdValue } from "./utils.js";
 
 // POST payload shape expected from iOS:
 // {
@@ -1234,4 +1235,44 @@ export async function runCorrelationEngineAndPromoteForUser(db, options) {
   });
 
   return { ...result, promotedCount: promoted?.newlySurfacedCount ?? 0 };
+}
+
+// Fetch a single per-day analysis pack (e.g. daily_roundup_v1) for a user + dateKey.
+// Returns a normalized doc (string id, string userId, no _id) or null if not found.
+export async function fetchUserDayAnalysisPack(db, { userId, dateKey, algorithmVersion }) {
+  if (!db) throw new Error("DB not ready");
+
+  const userIdRaw = String(userId || "").trim();
+  const dateKeyRaw = String(dateKey || "").trim();
+  const algo = String(algorithmVersion || "").trim();
+
+  if (!userIdRaw) throw new Error("Missing userId");
+  if (!dateKeyRaw) throw new Error("Missing dateKey");
+  if (!algo) throw new Error("Missing algorithmVersion");
+
+  const packsCol = db.collection("user_analysis_correlation_packs");
+
+  // userId may be stored as ObjectId OR string.
+  const userIdValue = coerceUserIdValue(userIdRaw);
+  const userIdFilters = [{ userId: userIdValue }];
+  const userIdStr = String(userIdRaw);
+  if (userIdStr && userIdStr !== String(userIdValue)) {
+    userIdFilters.push({ userId: userIdStr });
+  }
+
+  const doc = await packsCol.findOne({
+    $and: [
+      { $or: userIdFilters },
+      { dateKey: dateKeyRaw },
+      { algorithmVersion: algo },
+    ],
+  });
+
+  if (!doc) return null;
+
+  const out = { ...doc };
+  if (out && out._id) out.id = String(out._id);
+  if (out && out.userId && typeof out.userId === "object") out.userId = String(out.userId);
+  delete out._id;
+  return out;
 }
