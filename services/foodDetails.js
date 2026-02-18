@@ -39,11 +39,7 @@ function buildOffNutrientsArray(off) {
       if (perServing !== null) perServing = normalize(perServing);
     }
 
-    // Fallback: if per-100g missing but per-serving exists, mirror serving into per_100g
-    // so the client has something usable (still marked as OFF + lower confidence).
-    if (per100g === null && perServing !== null) {
-      per100g = perServing;
-    }
+    // Removed fallback: do not mirror per_serving into per_100g.
 
     if (per100g === null && perServing === null) return;
 
@@ -442,6 +438,7 @@ export async function getFoodDetails(db, ids) {
           food_type: 1,
           brand: 1,
           default_portion: 1,
+          serving_info: 1,
           nutrients: 1,
           ingredient_profile_v1: 1,
           ingredients_text: 1,
@@ -466,16 +463,22 @@ export async function getFoodDetails(db, ids) {
   const items = docs.map((doc) => {
     const nutrientsArray = ensureNutrientsFallback(doc);
 
-    // Normalize nutrients to something easy for Swift:
-    // - keep key, display label, unit, per_100g
-    // - perServing is optional; when present you can prefer it for "serving" quantities
-    const nutrients = nutrientsArray.map((n) => ({
+    // Ensure per_100g is correctly derived when only per_serving exists.
+    // We pass serving context so normalizeNutrientsForClient can compute per_100g.
+    const servingCtx = {
+      servingSize: doc?.serving_info?.serving_size ?? null,
+      servingSizeUnit: doc?.serving_info?.serving_size_unit ?? null,
+    };
+
+    const normalizedNutrientsArray = normalizeNutrientsForClient(nutrientsArray, servingCtx);
+
+    // Shape for Swift.
+    const nutrients = normalizedNutrientsArray.map((n) => ({
       key: n.key || null,
       label: n.display_name || null,
       unit: n.unit || null,
       per100g: typeof n.per_100g === "number" ? n.per_100g : null,
       perServing: typeof n.per_serving === "number" ? n.per_serving : null,
-      // Keep raw fields if you ever want them:
       source: n.source || null,
       dataQuality: n.data_quality || null,
       confidence: typeof n.confidence === "number" ? n.confidence : null,
@@ -706,7 +709,11 @@ export async function fetchBestDocForBarcode(db, normalizedUPC16) {
 
   // Normalize nutrient keys for client compatibility
   if (Array.isArray(doc.nutrients)) {
-    doc.nutrients = normalizeNutrientsForClient(doc.nutrients);
+    const servingCtx = {
+      servingSize: doc?.serving_info?.serving_size ?? null,
+      servingSizeUnit: doc?.serving_info?.serving_size_unit ?? null,
+    };
+    doc.nutrients = normalizeNutrientsForClient(doc.nutrients, servingCtx);
   }
 
   // Attach submit-ready USDA equivalent food_id when possible
@@ -956,6 +963,9 @@ export async function applyIngredientMicronutrientEstimates(db, foodId) {
       },
     }
   );
+
+  return { ok: true, added: newNutrients.length, id: String(foodId) };
+}
 
   return { ok: true, added: newNutrients.length, id: String(foodId) };
 }
