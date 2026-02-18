@@ -120,6 +120,74 @@ export async function buildUserEnrichedDoc(payload, headers, db) {
     updatedAt: now,
   };
 
+  // --- Parse low-confidence quantified ingredient estimates (if provided by GPT) ---
+  // GPT stores a minified JSON string at: health_flags.ingredients_amounts_estimate_v1
+  // We parse and store a structured copy on the doc for downstream deterministic enrichment.
+  try {
+    const hf = docToInsert && docToInsert.health_flags && typeof docToInsert.health_flags === "object" ? docToInsert.health_flags : null;
+    const nonFood = hf && (hf.non_food_suspected === true || hf.nonFoodSuspected === true);
+
+    if (!nonFood) {
+      const raw = hf && typeof hf.ingredients_amounts_estimate_v1 === "string" ? hf.ingredients_amounts_estimate_v1.trim() : "";
+      if (raw) {
+        const parsed = JSON.parse(raw);
+
+        const items = parsed && Array.isArray(parsed.items) ? parsed.items : null;
+        const unit = parsed && typeof parsed.unit === "string" ? parsed.unit : "g_per_100g";
+        const version = parsed && Number.isFinite(parsed.version) ? parsed.version : 1;
+        const method = parsed && typeof parsed.method === "string" ? parsed.method : "ranked_weighting_v1";
+        const basis = parsed && typeof parsed.basis === "string" ? parsed.basis : "ingredient_order_only";
+
+        if (items && items.length > 0) {
+          // Normalize and validate items
+          const cleanedItems = [];
+          for (const it of items) {
+            if (!it || typeof it !== "object") continue;
+
+            const name = typeof it.name === "string" ? it.name.trim() : "";
+            const g = typeof it.g === "number" && Number.isFinite(it.g) ? it.g : null;
+            const conf = typeof it.confidence === "number" && Number.isFinite(it.confidence) ? it.confidence : null;
+
+            if (!name || g == null) continue;
+            if (g < 0 || g > 100) continue;
+
+            // Bound confidence to the low-confidence range we expect
+            const boundedConf = conf == null ? null : Math.max(0.0, Math.min(0.6, conf));
+
+            cleanedItems.push({
+              name,
+              g: Math.round(g * 10) / 10, // keep 0.1g resolution
+              confidence: boundedConf == null ? undefined : boundedConf,
+            });
+          }
+
+          const sum = cleanedItems.reduce((acc, it) => acc + (typeof it.g === "number" ? it.g : 0), 0);
+
+          // Accept within ±0.5g rounding tolerance.
+          if (cleanedItems.length > 0 && Math.abs(sum - 100) <= 0.5) {
+            docToInsert.ingredients_amounts_estimate_v1 = {
+              version,
+              method,
+              basis,
+              unit,
+              items: cleanedItems,
+            };
+
+            docToInsert.ingredients_amounts_estimation_meta = {
+              version: 1,
+              parsed_at: now,
+              source: "gpt",
+              note: "Low-confidence ingredient grams-per-100g estimate parsed from health_flags.ingredients_amounts_estimate_v1",
+            };
+          }
+        }
+      }
+    }
+  } catch (e) {
+    // If parsing fails, just omit the structured estimate (non-fatal)
+    console.warn("[User-Enriched] Failed parsing ingredients_amounts_estimate_v1:", e);
+  }
+
   // --- Finalize canonical + alias fields using the FINAL corrected identity ---
   // Keep any GPT-provided semantic aliases (even if misspelled), but ensure
   // corrected brand/product spellings are always included.
