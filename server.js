@@ -2063,6 +2063,26 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
 
     console.log("[API] Raw:", raw, "Clean:", cleaned, "Normalized16:", normalized);
 
+    // Provide serving-size context so utils.normalizeNutrientsForClient can backfill per_100g
+    // from per_serving (when per_100g is missing).
+    const buildNutrientCtx = (d) => {
+      const servingSize =
+        d?.serving_info?.serving_size ??
+        d?.servingInfo?.servingSize ??
+        d?.servingSize ??
+        d?.serving_size ??
+        null;
+
+      const servingSizeUnit =
+        d?.serving_info?.serving_size_unit ??
+        d?.servingInfo?.servingSizeUnit ??
+        d?.servingSizeUnit ??
+        d?.serving_size_unit ??
+        null;
+
+      return { servingSize, servingSizeUnit };
+    };
+
     // 1) Direct USDA branded match for this exact barcode (gold standard for *US* products)
     let doc = await collection.findOne({
       ...notIgnoredQuery(),
@@ -2075,7 +2095,7 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
 
     if (doc) {
       if (Array.isArray(doc.nutrients)) {
-        doc.nutrients = normalizeNutrientsForClient(doc.nutrients);
+        doc.nutrients = normalizeNutrientsForClient(doc.nutrients, buildNutrientCtx(doc));
       }
       console.log("[API] Lookup result: DIRECT USDA branded match for barcode", normalized);
       return res.json(doc);
@@ -2089,7 +2109,7 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
 
     if (doc) {
       if (Array.isArray(doc.nutrients)) {
-        doc.nutrients = normalizeNutrientsForClient(doc.nutrients);
+        doc.nutrients = normalizeNutrientsForClient(doc.nutrients, buildNutrientCtx(doc));
       }
       const userSubmitted = !!doc?.source?.user_submitted;
       const sourceType = doc?.source?.type || "";
@@ -2126,7 +2146,7 @@ app.get("/foods/barcode/:barcode", async (req, res) => {
     // Canadian/OFF or user-submitted records remain the primary document,
     // and USDA equivalents are used only as supplemental data elsewhere.
     if (doc && Array.isArray(doc.nutrients)) {
-      doc.nutrients = normalizeNutrientsForClient(doc.nutrients);
+      doc.nutrients = normalizeNutrientsForClient(doc.nutrients, buildNutrientCtx(doc));
     }
     doc = await attachUSDAEquivalentFoodIdToDoc(db, doc);
     return res.json(doc);
