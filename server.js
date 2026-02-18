@@ -8,12 +8,12 @@ isBarcodeLockedParsedMealItem, normalizeBarcodeTo16, coerceUserIdValue } from ".
 import { findBestMatchesForMealItems, enrichMealSearchResultWithUSDAEquivalent } from "./services/mealSearch.js";
 import { buildUserEnrichedDoc, ensureSimpleIngredientsFromParsedList} from "./services/enrich.js";
 import { deleteUserAndAllData, ensureUser, updateUserProfile, patchUserDailyTotals, storeUserEnergySamples, 
-upsertUserEnergySnapshotForDate, addRecoveryEmail, verifyRecoveryEmail, recoverAccount, findUserIdByDeviceId, isValidDateKey, dateFromDateKeyUTC, 
-dateKeyFromDateUTC, addDaysDateKeyUTC, computeLogicalDateKeyFromLoggedAt, getFavoritesForRequest,
-getUserDailyGoals, seedUserDailyGoals, patchUserDailyGoals } from "./services/users.js";
+  upsertUserEnergySnapshotForDate, addRecoveryEmail, verifyRecoveryEmail, recoverAccount, findUserIdByDeviceId, isValidDateKey, dateFromDateKeyUTC, 
+  dateKeyFromDateUTC, addDaysDateKeyUTC, computeLogicalDateKeyFromLoggedAt, getFavoritesForRequest,
+  getUserDailyGoals, seedUserDailyGoals, patchUserDailyGoals } from "./services/users.js";
 import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, deleteUserMeal} from "./services/userMeals.js";
-import { getFoodDetails, attachUSDAEquivalentFoodIdToCandidates, attachUSDAEquivalentFoodIdToDoc, chooseBestCanadianDocForUPC, 
-fetchBestDocForBarcode, makeBarcodeLockedCandidateFromDoc,  } from "./services/foodDetails.js";
+import { getFoodDetails, attachUSDAEquivalentFoodIdToCandidates, attachUSDAEquivalentFoodIdToDoc, chooseBestCanadianDocForUPC,
+  fetchBestDocForBarcode, makeBarcodeLockedCandidateFromDoc, applyIngredientMicronutrientEstimates } from "./services/foodDetails.js";
 import { getUserFavoritesByUserId, addUserFavoriteByUserId, deleteUserFavoriteByUserId,} from "./services/favorites.js";
 import { storeUserCorrelationPack, runCorrelationEngineForUser, runCorrelationEngineAndPromoteForUser, fetchUserDayAnalysisPack } from "./services/userAnalysis.js";
 import { getAwardsForUser, applyAwardEvent } from "./services/awards.js";
@@ -1929,6 +1929,15 @@ app.post("/foods/user-enriched", async (req, res) => {
       }
     }
 
+    // Best-effort: add estimated micronutrients from simple-ingredient lab data (never overwrites label/lab totals)
+    try {
+      if (db && result?.insertedId) {
+        await applyIngredientMicronutrientEstimates(db, result.insertedId);
+      }
+    } catch (estErr) {
+      console.error("[User-Enriched] Ingredient micronutrient estimation failed (best-effort):", estErr);
+    }
+
     res.status(201).json({
       ok: true,
       insertedId: result.insertedId,
@@ -2008,6 +2017,15 @@ app.post("/user-enriched-food-item", async (req, res) => {
           ingErr
         );
       }
+    }
+
+    // Best-effort: add estimated micronutrients from simple-ingredient lab data (never overwrites label/lab totals)
+    try {
+      if (db && result?.insertedId) {
+        await applyIngredientMicronutrientEstimates(db, result.insertedId);
+      }
+    } catch (estErr) {
+      console.error("[User-Enriched Alias] Ingredient micronutrient estimation failed (best-effort):", estErr);
     }
 
     res.status(201).json({
