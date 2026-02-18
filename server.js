@@ -15,7 +15,7 @@ import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, delete
 import { getFoodDetails, attachUSDAEquivalentFoodIdToCandidates, attachUSDAEquivalentFoodIdToDoc, chooseBestCanadianDocForUPC, 
 fetchBestDocForBarcode, makeBarcodeLockedCandidateFromDoc,  } from "./services/foodDetails.js";
 import { getUserFavoritesByUserId, addUserFavoriteByUserId, deleteUserFavoriteByUserId,} from "./services/favorites.js";
-import { storeUserCorrelationPack, runCorrelationEngineForUser, runCorrelationEngineAndPromoteForUser } from "./services/userAnalysis.js";
+import { storeUserCorrelationPack, runCorrelationEngineForUser, runCorrelationEngineAndPromoteForUser, fetchUserDayAnalysisPack } from "./services/userAnalysis.js";
 import { getAwardsForUser, applyAwardEvent } from "./services/awards.js";
 
 const app = express();
@@ -588,6 +588,7 @@ app.patch("/users/:id/daily-goals", async (req, res) => {
 
     const patch = (req.body && typeof req.body === "object") ? req.body : {};
 
+    // 🔎 ADD THIS LOG
     console.log("[Users/DailyGoals/Patch] userId=", userId);
     console.log("[Users/DailyGoals/Patch] raw body=", JSON.stringify(req.body));
     console.log("[Users/DailyGoals/Patch] patch keys=", Object.keys(patch));
@@ -1793,6 +1794,43 @@ app.post("/user-analysis/run-correlation-engine", async (req, res) => {
   } catch (err) {
     console.error("[UserAnalysis/RunCorrelationEngine] Error:", err);
     return res.status(500).json({ ok: false, error: err?.message || "Failed to run correlation engine" });
+  }
+});
+
+//------------------------------------------------------------------------------------------------------------------------------------
+
+app.get("/users/:id/analysis/day-pack", async (req, res) => {
+  try {
+    if (!db) return res.status(500).json({ ok: false, error: "DB not ready" });
+
+    const userIdRaw = String(req.params?.id || "").trim();
+    if (!userIdRaw || !ObjectId.isValid(userIdRaw)) {
+      return res.status(400).json({ ok: false, error: "Missing or invalid ':id' (userId)." });
+    }
+
+    const dateKey = String(req.query?.dateKey || "").trim();
+    if (!isValidDateKey(dateKey)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing or invalid required query parameter 'dateKey' (expected YYYY-MM-DD).",
+      });
+    }
+
+    const algorithmVersion = String(req.query?.algorithmVersion || "daily_roundup_v1").trim();
+    if (!algorithmVersion) {
+      return res.status(400).json({ ok: false, error: "Missing or invalid 'algorithmVersion'." });
+    }
+
+    const item = await fetchUserDayAnalysisPack(db, { userId: userIdRaw, dateKey, algorithmVersion });
+
+    if (!item) {
+      return res.status(404).json({ ok: false, error: "Not found", userId: userIdRaw, dateKey, algorithmVersion });
+    }
+
+    return res.json({ ok: true, userId: userIdRaw, dateKey, algorithmVersion, item });
+  } catch (err) {
+    console.error("[Users/Analysis/DayPack] Error:", err);
+    return res.status(500).json({ ok: false, error: err?.message || "Failed to fetch day analysis pack" });
   }
 });
 
