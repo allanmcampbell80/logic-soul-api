@@ -953,10 +953,92 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
         gramsToAdd = value;
 
       // Case 1b: explicit milliliters
-      // For now, treat 1 mL ≈ 1 g (good approximation for water/coffee-like liquids).
-      // Later we can add food-specific density if needed.
+      // Prefer serving-based math when the food defines serving_size in mL.
+      // This keeps label-based per_serving nutrients aligned (e.g., 125 mL serving).
       } else if (value && unit === "ml") {
-        gramsToAdd = value;
+        try {
+          const food = await foodItemsCollection.findOne({
+            _id: new ObjectId(foodIdStr),
+          });
+
+          let handledAsServing = false;
+
+          if (
+            food &&
+            food.serving_info &&
+            typeof food.serving_info.serving_size === "number"
+          ) {
+            const servingUnit = String(
+              food.serving_info.serving_size_unit || ""
+            ).toLowerCase();
+
+            if (servingUnit === "ml") {
+              const servingSizeMl = food.serving_info.serving_size;
+              if (servingSizeMl > 0) {
+                // --- Condensed vs prepared handling (opt-in, with safe fallback) ---
+                // If a food declares a prepared volume multiplier (e.g., condensed soup where 1 serving
+                // becomes 2x volume after adding water), and the meal item explicitly marks preparation
+                // as "prepared", we adjust servings/grams so daily totals align with label intent.
+                //
+                // This is intentionally conservative: we do NOT auto-guess prepared vs condensed.
+                // We only apply the multiplier when the client provides the hint.
+                const prep = String(qty?.preparation || qty?.prep || qty?.state || "").trim().toLowerCase();
+
+                const multRaw = food?.serving_info?.prepared_volume_multiplier;
+                const preparedVolumeMultiplier =
+                  typeof multRaw === "number" && Number.isFinite(multRaw) && multRaw > 0
+                    ? multRaw
+                    : null;
+
+                const isPrepared = prep === "prepared" || prep === "as_prepared" || prep === "mixed";
+
+                const effectiveServingSizeMl =
+                  isPrepared && preparedVolumeMultiplier
+                    ? servingSizeMl * preparedVolumeMultiplier
+                    : servingSizeMl;
+
+                const servingsCount = value / effectiveServingSizeMl;
+
+                // Aggregate servings for primary (label/OCR) per_serving nutrients.
+                const prevServ = foodServingsById.get(foodIdStr) || 0;
+                foodServingsById.set(foodIdStr, prevServ + servingsCount);
+
+                // Keep a grams-equivalent for enrichment / USDA-delta.
+                // We treat 1 mL ≈ 1 g for the base liquid, BUT if this entry is "prepared" and a
+                // multiplier is present, only (value / multiplier) mL worth of CONDENSED product was
+                // actually consumed; the rest is added water.
+                const gramsEquivalent =
+                  isPrepared && preparedVolumeMultiplier
+                    ? value / preparedVolumeMultiplier
+                    : value;
+
+                normalizedItems.push({
+                  primaryFoodIdStr: foodIdStr,
+                  grams: gramsEquivalent,
+                  servings: servingsCount,
+                  usdaEquivalentFoodIdStr: usdaEqIdStr,
+                  useUSDAEquivalent: useUsdaEq,
+                });
+
+                handledAsServing = true;
+              }
+            }
+          }
+
+          // Fallback: if no serving_info in mL, keep old behavior (1 mL ≈ 1 g)
+          if (!handledAsServing) {
+            gramsToAdd = value;
+          }
+        } catch (err) {
+          console.error(
+            "[recomputeDailyNutritionTotals] ml handling failed, falling back to grams",
+            {
+              foodIdStr,
+              error: err?.message || err,
+            }
+          );
+          gramsToAdd = value;
+        }
 
       } else {
         // Case 2: fallback to serving size (grams-per-serving) when:
@@ -1696,3 +1778,4 @@ export async function deleteUserMeal(db, userId, mealId) {
     dateKey: dateKey || null,
   };
 }
+
