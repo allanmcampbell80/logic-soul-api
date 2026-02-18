@@ -334,6 +334,12 @@ export async function logUserMeal(userId, payload) {
                   ? it.quantity.unit
                   : (typeof it.quantityUnit === "string" ? it.quantityUnit : "g");
 
+              // Add preparation hint so idempotency key changes if only preparation changes.
+              const prep =
+                typeof it?.quantity?.preparation === "string"
+                  ? it.quantity.preparation
+                  : (typeof it?.quantityPreparation === "string" ? it.quantityPreparation : null);
+
               return {
                 name: typeof it?.name === "string" ? it.name : null,
                 foodId: foodId || null,
@@ -341,6 +347,7 @@ export async function logUserMeal(userId, payload) {
                 useUsdaEq: Boolean(useUsdaEq),
                 qtyVal: typeof qtyVal === "number" && Number.isFinite(qtyVal) ? qtyVal : null,
                 qtyUnit: typeof qtyUnit === "string" ? qtyUnit : "g",
+                prep: typeof prep === "string" && prep.trim() ? prep.trim().toLowerCase() : null,
               };
             })
             // stable ordering regardless of UI order
@@ -404,7 +411,8 @@ export async function logUserMeal(userId, payload) {
         // or a legacy/simple number (e.g. 250) with quantityUnit (e.g. "ml").
         let qty = null;
         if (it.quantity && typeof it.quantity === "object") {
-          qty = it.quantity;
+          // Clone so we can safely add/normalize fields without mutating the caller payload.
+          qty = { ...it.quantity };
         } else if (typeof it.quantity === "number" && Number.isFinite(it.quantity)) {
           qty = {
             value: it.quantity,
@@ -413,6 +421,15 @@ export async function logUserMeal(userId, payload) {
             basis: "ui",
             confidence: 1,
           };
+        }
+
+        // If the client supplies a preparation hint (e.g., "prepared" for condensed foods),
+        // store it inside the quantity object so recompute can apply prepared_volume_multiplier.
+        if (qty && typeof it.quantityPreparation === "string" && it.quantityPreparation.trim()) {
+          // Only set if not already provided by newer clients.
+          if (typeof qty.preparation !== "string" || !qty.preparation.trim()) {
+            qty.preparation = it.quantityPreparation.trim();
+          }
         }
 
         const qtyUnit = qty?.unit ? String(qty.unit) : null;
