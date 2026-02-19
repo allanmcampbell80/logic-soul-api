@@ -120,6 +120,112 @@ export async function buildUserEnrichedDoc(payload, headers, db) {
     updatedAt: now,
   };
 
+  // --- Truth beats estimates (label/USDA values override any inferred/estimated duplicates) ---
+  const applyTruthBeatsEstimatesToNutrients = (doc) => {
+    const arr = Array.isArray(doc?.nutrients) ? doc.nutrients : null;
+    if (!arr || arr.length === 0) return;
+
+    const norm = (v) => (typeof v === "string" ? v.trim() : "");
+
+    const isTruth = (n) => {
+      const source = norm(n?.source).toLowerCase();
+      const dq = norm(n?.data_quality).toLowerCase();
+      const conf = typeof n?.confidence === "number" ? n.confidence : null;
+
+      // Treat Nutrition Facts label as truth.
+      if (source === "label") return true;
+      if (dq.includes("label")) return true;
+      if (conf === 1 && source === "label") return true;
+
+      // Treat USDA-derived values as truth (covers both direct USDA foods and equivalents).
+      if (source.includes("usda")) return true;
+      if (dq.includes("usda")) return true;
+
+      return false;
+    };
+
+    const isEstimate = (n) => {
+      if (n?.is_estimated === true) return true;
+      const source = norm(n?.source).toLowerCase();
+      const dq = norm(n?.data_quality).toLowerCase();
+
+      if (source.includes("ingredients_estimate")) return true;
+      if (source.includes("inferred_from_ingredients")) return true;
+      if (dq.includes("ingredients_estimate")) return true;
+      if (dq.includes("recipe_estimate")) return true;
+
+      return false;
+    };
+
+    // Rank preference for duplicates: label truth > USDA truth > other non-estimate > estimate
+    const rank = (n) => {
+      const source = norm(n?.source).toLowerCase();
+      const dq = norm(n?.data_quality).toLowerCase();
+      if (source === "label" || dq.includes("label")) return 400;
+      if (source.includes("usda") || dq.includes("usda")) return 300;
+      if (!isEstimate(n)) return 200;
+      return 100;
+    };
+
+    // Energy gates: never allow estimated energy to coexist; keep only truth if present.
+    const hardBlockedEstimateKeys = new Set(["energy_kcal", "energy_kj"]);
+
+    // First pass: group by key
+    const byKey = new Map();
+    for (const n of arr) {
+      if (!n || typeof n !== "object") continue;
+      const key = norm(n.key);
+      if (!key) continue;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(n);
+    }
+
+    const cleaned = [];
+
+    for (const [key, list] of byKey.entries()) {
+      if (!list || list.length === 0) continue;
+
+      const truthItems = list.filter(isTruth);
+
+      // If we have any truth values for this key, drop all estimates for this key.
+      if (truthItems.length > 0) {
+        // Keep the single best truth item (highest rank), drop everything else.
+        let best = truthItems[0];
+        for (const t of truthItems) {
+          if (rank(t) > rank(best)) best = t;
+        }
+        cleaned.push(best);
+        continue;
+      }
+
+      // No truth items: optionally drop hard-blocked estimated energy keys.
+      if (hardBlockedEstimateKeys.has(key)) {
+        // If the only thing we have is estimated energy, omit it entirely.
+        continue;
+      }
+
+      // Otherwise keep the single best item for this key (non-estimate preferred).
+      let best = list[0];
+      for (const t of list) {
+        if (rank(t) > rank(best)) best = t;
+      }
+      cleaned.push(best);
+    }
+
+    // Preserve stable order by display_name/key for readability, but keep deterministic.
+    cleaned.sort((a, b) => {
+      const ak = norm(a?.key).toLowerCase();
+      const bk = norm(b?.key).toLowerCase();
+      if (ak < bk) return -1;
+      if (ak > bk) return 1;
+      return 0;
+    });
+
+    doc.nutrients = cleaned;
+  };
+
+  applyTruthBeatsEstimatesToNutrients(docToInsert);
+
   // --- Parse low-confidence quantified ingredient estimates (if provided by GPT) ---
   // GPT stores a minified JSON string at: health_flags.ingredients_amounts_estimate_v1
   // We parse and store a structured copy on the doc for downstream deterministic enrichment.
