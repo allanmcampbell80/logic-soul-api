@@ -869,7 +869,15 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
             typeof food.serving_info.serving_size === "number"
           ) {
             const servingUnit = String(food.serving_info.serving_size_unit || "").toLowerCase();
+
+            // If serving size is declared in grams, use it directly.
             if (servingUnit === "g" || servingUnit === "gram" || servingUnit === "grams") {
+              gramsPerServing = food.serving_info.serving_size;
+            }
+
+            // If serving size is declared in mL (common for soups/drinks), treat 1 mL ≈ 1 g
+            // for the purposes of computing USDA per-100g enrichment deltas.
+            if (gramsPerServing == null && servingUnit === "ml") {
               gramsPerServing = food.serving_info.serving_size;
             }
           }
@@ -927,12 +935,6 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
           });
 
           if (useUsdaEq && usdaEqIdStr && (!gramsForUsda || Number.isNaN(gramsForUsda))) {
-            debugWarn("[recomputeDailyNutritionTotals] USDA delta may be skipped (missing gramsPerServing)", {
-              foodIdStr,
-              usdaEqIdStr,
-              servingsCount,
-              gramsPerServing: meta.gramsPerServing,
-            });
           }
 
           continue;
@@ -1832,4 +1834,5 @@ export async function deleteUserMeal(db, userId, mealId) {
     dateKey: dateKey || null,
   };
 }
+
 
