@@ -1171,7 +1171,6 @@ const DAILY_GOAL_BOUNDS = {
   vitamin_d_ug: { min: 0, max: 250 },
   vitamin_c_mg: { min: 0, max: 5000 },
   caffeine_mg: { min: 0, max: 2000 },
-  water_g: { min: 0, max: 10000 },
   // Hydration (ml in totals)
   water_from_food_ml: { min: 0, max: 20000 },
   water_from_drinks_ml: { min: 0, max: 20000 },
