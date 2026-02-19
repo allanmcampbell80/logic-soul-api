@@ -109,6 +109,10 @@ const DAILY_PANEL_NUTRIENTS = {
   serine: { field: "serine_g", unit: "g" },
 
   carbohydrate: { field: "carbs_g", unit: "g" },
+  // Common alias keys we may receive from different pipelines
+  carbs: { field: "carbs_g", unit: "g" },
+  carbohydrates: { field: "carbs_g", unit: "g" },
+  total_carbohydrate: { field: "carbs_g", unit: "g" },
   fiber: { field: "fiber_g", unit: "g" },
   total_sugars: { field: "sugars_g", unit: "g" },
   total_lipid_fat: { field: "fat_g", unit: "g" },
@@ -176,6 +180,7 @@ const DAILY_PANEL_NUTRIENTS = {
   cholesterol: { field: "cholesterol_mg", unit: "mg" },
   // Water from foods (USDA reports in grams; store as mL for easy merging with user hydration)
   water: { field: "water_from_food_ml", unit: "g" },
+  water_total: { field: "water_from_food_ml", unit: "g" },
 
   // Micros — vitamins
   vitamin_c: { field: "vitamin_c_mg", unit: "mg" },
@@ -244,6 +249,7 @@ const DAILY_PANEL_NUTRIENTS = {
   betaine: { field: "betaine_mg", unit: "mg" },
   alcohol_ethyl: { field: "alcohol_g", unit: "g" },
   fluoride_f: { field: "fluoride_ug", unit: "µg" },
+  fluoride: { field: "fluoride_ug", unit: "µg" },
   beta_sitosterol: { field: "beta_sitosterol_mg", unit: "mg" },
 
   // Useful health-related micros
@@ -1216,10 +1222,24 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
         if (!nutrientKey) continue;
 
         const cfg = DAILY_PANEL_NUTRIENTS[nutrientKey];
-        if (!cfg) continue;
+        if (!cfg) {
+          debugLog("[recomputeDailyNutritionTotals] skip nutrient (unknown key)", {
+            foodId: food?._id?.toString?.() || null,
+            name: food?.name || food?.common_name || null,
+            nutrientKey,
+            unit: nutrient?.unit || null,
+            source: nutrient?.source || null,
+          });
+          continue;
+        }
 
-        const unit = normalizeUnit(toUnitString(nutrient.unit));
+        let unit = normalizeUnit(toUnitString(nutrient.unit));
         const expectedUnit = normalizeUnit(cfg.unit);
+
+        // Special-case: water may arrive in mL in some pipelines; treat 1 mL ~= 1 g
+        if (nutrientKey === "water" && unit && unit.toLowerCase() === "ml") {
+          unit = "g";
+        }
 
         let per100g = toNumber(nutrient.per_100g ?? nutrient.per100g);
         let perServing = toNumber(nutrient.per_serving ?? nutrient.perServing);
@@ -1228,7 +1248,19 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
           const canConvert100g = per100g != null && convertIfNeeded(per100g, unit, expectedUnit) != null;
           const canConvertServing = perServing != null && convertIfNeeded(perServing, unit, expectedUnit) != null;
 
-          if (!canConvert100g && !canConvertServing) continue;
+          if (!canConvert100g && !canConvertServing) {
+            debugLog("[recomputeDailyNutritionTotals] skip nutrient (unit mismatch)", {
+              foodId: food?._id?.toString?.() || null,
+              name: food?.name || food?.common_name || null,
+              nutrientKey,
+              unit,
+              expectedUnit,
+              per100g,
+              perServing,
+              source: nutrient?.source || null,
+            });
+            continue;
+          }
 
           if (per100g != null) {
             const converted = convertIfNeeded(per100g, unit, expectedUnit);
@@ -1279,7 +1311,21 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
           contribution = per100g * factor;
         }
 
-        if (typeof contribution !== "number" || Number.isNaN(contribution)) continue;
+        if (typeof contribution !== "number" || Number.isNaN(contribution)) {
+          debugLog("[recomputeDailyNutritionTotals] skip nutrient (bad contribution)", {
+            foodId: food?._id?.toString?.() || null,
+            name: food?.name || food?.common_name || null,
+            nutrientKey,
+            unit,
+            expectedUnit,
+            per100g,
+            perServing,
+            grams,
+            servings,
+            source: nutrient?.source || null,
+          });
+          continue;
+        }
 
         // water is stored as mL (1 g ~ 1 mL)
         if (nutrientKey === "water" && cfg.field === "water_from_food_ml") {
