@@ -71,7 +71,7 @@ function buildOffNutrientsArray(off) {
 
   // Protein (g)
   addOffNutrient({
-    key: "protein",
+    key: "protein_g",
     display_name: "Protein",
     unit: "g",
     per100gKeys: ["proteins_100g"],
@@ -80,16 +80,16 @@ function buildOffNutrientsArray(off) {
 
   // Carbs (g)
   addOffNutrient({
-    key: "carbohydrate",
+    key: "carbs_g",
     display_name: "Carbohydrate",
     unit: "g",
     per100gKeys: ["carbohydrates_100g"],
     perServingKeys: ["carbohydrates_serving"],
   });
 
-  // Fat (g)
+  // Fat (g) -> canonical key used everywhere else
   addOffNutrient({
-    key: "total_lipid_fat",
+    key: "fat_g",
     display_name: "Total lipid (fat)",
     unit: "g",
     per100gKeys: ["fat_100g"],
@@ -98,7 +98,7 @@ function buildOffNutrientsArray(off) {
 
   // Sugars (g)
   addOffNutrient({
-    key: "total_sugars",
+    key: "sugars_g",
     display_name: "Total Sugars",
     unit: "g",
     per100gKeys: ["sugars_100g"],
@@ -107,7 +107,7 @@ function buildOffNutrientsArray(off) {
 
   // Fiber (g)
   addOffNutrient({
-    key: "fiber",
+    key: "fiber_g",
     display_name: "Fiber, total dietary",
     unit: "g",
     per100gKeys: ["fiber_100g"],
@@ -116,7 +116,7 @@ function buildOffNutrientsArray(off) {
 
   // Sodium (mg)
   addOffNutrient({
-    key: "sodium",
+    key: "sodium_mg",
     display_name: "Sodium, Na",
     unit: "mg",
     per100gKeys: ["sodium_100g"],
@@ -124,9 +124,9 @@ function buildOffNutrientsArray(off) {
     normalize: gToMgIfSmall,
   });
 
-  // Saturated fat (g)
+  // Saturated fat (g) -> canonical key used everywhere else
   addOffNutrient({
-    key: "saturated_fat",
+    key: "sat_fat_g",
     display_name: "Saturated fat",
     unit: "g",
     per100gKeys: ["saturated-fat_100g"],
@@ -144,7 +144,7 @@ function buildOffNutrientsArray(off) {
 
   // Potassium (mg)
   addOffNutrient({
-    key: "potassium",
+    key: "potassium_mg",
     display_name: "Potassium, K",
     unit: "mg",
     per100gKeys: ["potassium_100g"],
@@ -154,7 +154,7 @@ function buildOffNutrientsArray(off) {
 
   // Calcium (mg)
   addOffNutrient({
-    key: "calcium",
+    key: "calcium_mg",
     display_name: "Calcium, Ca",
     unit: "mg",
     per100gKeys: ["calcium_100g"],
@@ -164,7 +164,7 @@ function buildOffNutrientsArray(off) {
 
   // Iron (mg)
   addOffNutrient({
-    key: "iron",
+    key: "iron_mg",
     display_name: "Iron, Fe",
     unit: "mg",
     per100gKeys: ["iron_100g"],
@@ -174,7 +174,7 @@ function buildOffNutrientsArray(off) {
 
   // Vitamin C (mg)
   addOffNutrient({
-    key: "vitamin_c",
+    key: "vitamin_c_mg",
     display_name: "Vitamin C",
     unit: "mg",
     per100gKeys: ["vitamin-c_100g"],
@@ -184,12 +184,38 @@ function buildOffNutrientsArray(off) {
 
   // Vitamin A (µg)
   addOffNutrient({
-    key: "vitamin_a",
+    key: "vitamin_a_rae_ug",
     display_name: "Vitamin A",
     unit: "µg",
     per100gKeys: ["vitamin-a_100g"],
     perServingKeys: ["vitamin-a_serving"],
     normalize: gToUgIfTiny,
+  });
+
+  // Water from food (ml) — OFF often reports water in g; assume 1g ≈ 1ml.
+  addOffNutrient({
+    key: "water_from_food_ml",
+    display_name: "Water",
+    unit: "ml",
+    per100gKeys: ["water_100g", "water"],
+    perServingKeys: ["water_serving"],
+    normalize: (v) => v, // already in grams; interpret as ml
+  });
+
+  // Fluoride (µg) — best-effort; some OFF records use mg.
+  const toUgFluoride = (v) => {
+    if (!Number.isFinite(v)) return v;
+    if (v <= 1) return v * 1000; // likely mg -> µg
+    return v; // assume already µg
+  };
+
+  addOffNutrient({
+    key: "fluoride_ug",
+    display_name: "Fluoride, F",
+    unit: "µg",
+    per100gKeys: ["fluoride_100g", "fluoride"],
+    perServingKeys: ["fluoride_serving"],
+    normalize: toUgFluoride,
   });
 
   // --- Extra fallbacks for older OFF shapes ---
@@ -206,9 +232,9 @@ function buildOffNutrientsArray(off) {
     });
   }
 
-  if (!nutrients.some((n) => n.key === "protein")) {
+  if (!nutrients.some((n) => n.key === "protein_g")) {
     addOffNutrient({
-      key: "protein",
+      key: "protein_g",
       display_name: "Protein",
       unit: "g",
       per100gKeys: ["proteins_100g", "proteins", "proteins_value"],
@@ -216,9 +242,9 @@ function buildOffNutrientsArray(off) {
     });
   }
 
-  if (!nutrients.some((n) => n.key === "carbohydrate")) {
+  if (!nutrients.some((n) => n.key === "carbs_g")) {
     addOffNutrient({
-      key: "carbohydrate",
+      key: "carbs_g",
       display_name: "Carbohydrate",
       unit: "g",
       per100gKeys: ["carbohydrates_100g", "carbohydrates", "carbohydrates_value"],
@@ -226,9 +252,9 @@ function buildOffNutrientsArray(off) {
     });
   }
 
-  if (!nutrients.some((n) => n.key === "total_lipid_fat")) {
+  if (!nutrients.some((n) => n.key === "fat_g")) {
     addOffNutrient({
-      key: "total_lipid_fat",
+      key: "fat_g",
       display_name: "Total lipid (fat)",
       unit: "g",
       per100gKeys: ["fat_100g", "fat", "fat_value"],
@@ -236,9 +262,9 @@ function buildOffNutrientsArray(off) {
     });
   }
 
-  if (!nutrients.some((n) => n.key === "total_sugars")) {
+  if (!nutrients.some((n) => n.key === "sugars_g")) {
     addOffNutrient({
-      key: "total_sugars",
+      key: "sugars_g",
       display_name: "Total Sugars",
       unit: "g",
       per100gKeys: ["sugars_100g", "sugars", "sugars_value"],
@@ -246,9 +272,9 @@ function buildOffNutrientsArray(off) {
     });
   }
 
-  if (!nutrients.some((n) => n.key === "fiber")) {
+  if (!nutrients.some((n) => n.key === "fiber_g")) {
     addOffNutrient({
-      key: "fiber",
+      key: "fiber_g",
       display_name: "Fiber, total dietary",
       unit: "g",
       per100gKeys: ["fiber_100g", "fiber", "fiber_value"],
@@ -256,9 +282,9 @@ function buildOffNutrientsArray(off) {
     });
   }
 
-  if (!nutrients.some((n) => n.key === "sodium")) {
+  if (!nutrients.some((n) => n.key === "sodium_mg")) {
     addOffNutrient({
-      key: "sodium",
+      key: "sodium_mg",
       display_name: "Sodium, Na",
       unit: "mg",
       per100gKeys: ["sodium_100g", "sodium", "sodium_value"],
@@ -267,9 +293,9 @@ function buildOffNutrientsArray(off) {
     });
   }
 
-  if (!nutrients.some((n) => n.key === "saturated_fat")) {
+  if (!nutrients.some((n) => n.key === "sat_fat_g")) {
     addOffNutrient({
-      key: "saturated_fat",
+      key: "sat_fat_g",
       display_name: "Saturated fat",
       unit: "g",
       per100gKeys: ["saturated-fat_100g", "saturated-fat", "saturated-fat_value"],
@@ -287,9 +313,9 @@ function buildOffNutrientsArray(off) {
     });
   }
 
-  if (!nutrients.some((n) => n.key === "potassium")) {
+  if (!nutrients.some((n) => n.key === "potassium_mg")) {
     addOffNutrient({
-      key: "potassium",
+      key: "potassium_mg",
       display_name: "Potassium, K",
       unit: "mg",
       per100gKeys: ["potassium_100g", "potassium", "potassium_value"],
@@ -298,9 +324,9 @@ function buildOffNutrientsArray(off) {
     });
   }
 
-  if (!nutrients.some((n) => n.key === "calcium")) {
+  if (!nutrients.some((n) => n.key === "calcium_mg")) {
     addOffNutrient({
-      key: "calcium",
+      key: "calcium_mg",
       display_name: "Calcium, Ca",
       unit: "mg",
       per100gKeys: ["calcium_100g", "calcium", "calcium_value"],
@@ -309,9 +335,9 @@ function buildOffNutrientsArray(off) {
     });
   }
 
-  if (!nutrients.some((n) => n.key === "iron")) {
+  if (!nutrients.some((n) => n.key === "iron_mg")) {
     addOffNutrient({
-      key: "iron",
+      key: "iron_mg",
       display_name: "Iron, Fe",
       unit: "mg",
       per100gKeys: ["iron_100g", "iron", "iron_value"],
@@ -320,9 +346,9 @@ function buildOffNutrientsArray(off) {
     });
   }
 
-  if (!nutrients.some((n) => n.key === "vitamin_c")) {
+  if (!nutrients.some((n) => n.key === "vitamin_c_mg")) {
     addOffNutrient({
-      key: "vitamin_c",
+      key: "vitamin_c_mg",
       display_name: "Vitamin C",
       unit: "mg",
       per100gKeys: ["vitamin-c_100g", "vitamin-c", "vitamin-c_value"],
@@ -331,9 +357,9 @@ function buildOffNutrientsArray(off) {
     });
   }
 
-  if (!nutrients.some((n) => n.key === "vitamin_a")) {
+  if (!nutrients.some((n) => n.key === "vitamin_a_rae_ug")) {
     addOffNutrient({
-      key: "vitamin_a",
+      key: "vitamin_a_rae_ug",
       display_name: "Vitamin A",
       unit: "µg",
       per100gKeys: ["vitamin-a_100g", "vitamin-a", "vitamin-a_value"],
@@ -463,8 +489,8 @@ export async function getFoodDetails(db, ids) {
   const items = docs.map((doc) => {
     const nutrientsArray = ensureNutrientsFallback(doc);
 
-    // Ensure per_100g is correctly derived when only per_serving exists.
-    // We pass serving context so normalizeNutrientsForClient can compute per_100g.
+    // Normalize nutrients (and units/aliases) using serving context when available.
+    // NOTE: We do NOT mirror per_serving into per_100g when serving size is unknown.
     const servingCtx = {
       servingSize: doc?.serving_info?.serving_size ?? null,
       servingSizeUnit: doc?.serving_info?.serving_size_unit ?? null,
@@ -934,12 +960,51 @@ export async function applyIngredientMicronutrientEstimates(db, foodId) {
 
   const baseNutrients = Array.isArray(doc.nutrients) ? doc.nutrients : [];
 
+  // Never add ingredient-based estimated energy values.
+  // Energy should come from label / USDA; ingredient inference can be wildly wrong.
+  const DISALLOWED_ESTIMATE_KEYS = new Set(["energy_kcal", "energy_kj"]);
+
   // Prevent double-application.
   if (hasExistingIngredientEstimate(baseNutrients)) {
     return { ok: true, added: 0, id: String(foodId) };
   }
 
   const existingKeys = buildExistingKeySet(baseNutrients);
+
+  function canonicalTruthKey(k) {
+    const key = String(k || "").toLowerCase();
+
+    // macros
+    if (["protein", "protein_g"].includes(key)) return "protein_g";
+    if (["carbohydrate", "carbohydrates", "carbohydrate_g", "carbs", "carbs_g"].includes(key)) return "carbs_g";
+    if (["total_lipid_fat", "fat", "fat_g"].includes(key)) return "fat_g";
+    if (["saturated_fat", "fatty_acids_total_saturated", "sat_fat", "sat_fat_g"].includes(key)) return "sat_fat_g";
+    if (["fatty_acids_total_trans", "trans_fat", "trans_fat_g"].includes(key)) return "trans_fat_g";
+    if (["fiber", "fiber_g"].includes(key)) return "fiber_g";
+    if (["total_sugars", "sugars", "sugars_g"].includes(key)) return "sugars_g";
+
+    // core minerals on rings
+    if (["sodium", "sodium_mg"].includes(key)) return "sodium_mg";
+    if (["potassium", "potassium_k", "potassium_mg"].includes(key)) return "potassium_mg";
+    if (["calcium", "calcium_mg"].includes(key)) return "calcium_mg";
+    if (["iron", "iron_mg"].includes(key)) return "iron_mg";
+
+    // hydration
+    if (["water_from_food_ml", "water_from_food", "water", "water_g", "water_total", "water_total_ml"].includes(key)) return "water_total_ml";
+
+    // default: use original key
+    return String(k || "");
+  }
+
+  const truthCanonKeys = new Set();
+  for (const n of baseNutrients) {
+    const conf = n?.confidence;
+    const src = String(n?.source || "").toLowerCase();
+    const isTruth = conf === 1 || src === "label" || src === "usda";
+    if (!isTruth) continue;
+    const ck = canonicalTruthKey(n?.key);
+    if (ck) truthCanonKeys.add(ck);
+  }
 
   // Accumulate contributions by key.
   const acc = new Map(); // key -> { unit, display_name, value, confSum, weightSum }
@@ -960,6 +1025,11 @@ export async function applyIngredientMicronutrientEstimates(db, foodId) {
     for (const n of ingDoc.nutrients) {
       const key = n?.key ? String(n.key) : null;
       if (!key) continue;
+      // Truth beats estimates: if this nutrient category is already present as a label/USDA truth,
+      // skip any ingredient-based estimate (even if the incoming key differs).
+      const canonKey = canonicalTruthKey(key);
+      if (truthCanonKeys.has(canonKey)) continue;
+      if (DISALLOWED_ESTIMATE_KEYS.has(key)) continue;
       if (existingKeys.has(key)) continue; // never overwrite
 
       const per100g = n?.per_100g;
@@ -996,6 +1066,7 @@ export async function applyIngredientMicronutrientEstimates(db, foodId) {
 
   const newNutrients = [];
   for (const [key, v] of acc.entries()) {
+    if (DISALLOWED_ESTIMATE_KEYS.has(key)) continue;
     const per_100g = roundSmart(v.value);
     if (!isFiniteNumber(per_100g) || per_100g === 0) continue;
 
