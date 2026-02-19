@@ -6,31 +6,231 @@ export const driV1Bands = [
   // -----------------
   // MACROS / ENERGY
   // -----------------
+  // Energy (heuristic adult maintenance targets; sex + age banded)
+  // NOTE: These are heuristic maintenance targets (not EER). We can refine later using height/weight/activity.
+
+  // -----------------
+  // MEN (kcal)
+  // -----------------
   {
     nutrientKey: "energy_kcal",
-    sex: null,
+    sex: "male",
     minYears: 19,
+    maxYears: 30,
+    referenceType: "ai",
+    recommended: 2600,
+    lowerSafe: 1900,
+    upperSafe: 3600,
+    upperLimit: null,
+    unit: "kcal",
+    source: "Heuristic (male 19–30 maintenance; adjust per activity/body size)",
+  },
+  {
+    nutrientKey: "energy_kcal",
+    sex: "male",
+    minYears: 31,
+    maxYears: 50,
+    referenceType: "ai",
+    recommended: 2400,
+    lowerSafe: 1800,
+    upperSafe: 3400,
+    upperLimit: null,
+    unit: "kcal",
+    source: "Heuristic (male 31–50 maintenance; adjust per activity/body size)",
+  },
+  {
+    nutrientKey: "energy_kcal",
+    sex: "male",
+    minYears: 51,
+    maxYears: 70,
+    referenceType: "ai",
+    recommended: 2200,
+    lowerSafe: 1700,
+    upperSafe: 3200,
+    upperLimit: null,
+    unit: "kcal",
+    source: "Heuristic (male 51–70 maintenance; adjust per activity/body size)",
+  },
+  {
+    nutrientKey: "energy_kcal",
+    sex: "male",
+    minYears: 71,
     maxYears: null,
+    referenceType: "ai",
+    recommended: 2000,
+    lowerSafe: 1600,
+    upperSafe: 3000,
+    upperLimit: null,
+    unit: "kcal",
+    source: "Heuristic (male 71+ maintenance; adjust per activity/body size)",
+  },
+
+  // -----------------
+  // WOMEN (kcal)
+  // -----------------
+  {
+    nutrientKey: "energy_kcal",
+    sex: "female",
+    minYears: 19,
+    maxYears: 30,
     referenceType: "ai",
     recommended: 2000,
     lowerSafe: 1500,
     upperSafe: 3000,
     upperLimit: null,
     unit: "kcal",
-    source: "DRI",
+    source: "Heuristic (female 19–30 maintenance; adjust per activity/body size)",
+  },
+  {
+    nutrientKey: "energy_kcal",
+    sex: "female",
+    minYears: 31,
+    maxYears: 50,
+    referenceType: "ai",
+    recommended: 1800,
+    lowerSafe: 1400,
+    upperSafe: 2800,
+    upperLimit: null,
+    unit: "kcal",
+    source: "Heuristic (female 31–50 maintenance; adjust per activity/body size)",
+  },
+  {
+    nutrientKey: "energy_kcal",
+    sex: "female",
+    minYears: 51,
+    maxYears: 70,
+    referenceType: "ai",
+    recommended: 1700,
+    lowerSafe: 1300,
+    upperSafe: 2600,
+    upperLimit: null,
+    unit: "kcal",
+    source: "Heuristic (female 51–70 maintenance; adjust per activity/body size)",
+  },
+  {
+    nutrientKey: "energy_kcal",
+    sex: "female",
+    minYears: 71,
+    maxYears: null,
+    referenceType: "ai",
+    recommended: 1600,
+    lowerSafe: 1200,
+    upperSafe: 2400,
+    upperLimit: null,
+    unit: "kcal",
+    source: "Heuristic (female 71+ maintenance; adjust per activity/body size)",
+  },
+
+  // -----------------
+  // MEN (kJ)  (kcal × 4.184)
+  // -----------------
+  {
+    nutrientKey: "energy_kj",
+    sex: "male",
+    minYears: 19,
+    maxYears: 30,
+    referenceType: "ai",
+    recommended: 10878,
+    lowerSafe: 7949.6,
+    upperSafe: 15062.4,
+    upperLimit: null,
+    unit: "kJ",
+    source: "Heuristic (male 19–30; kcal × 4.184)",
   },
   {
     nutrientKey: "energy_kj",
-    sex: null,
-    minYears: 19,
-    maxYears: null,
+    sex: "male",
+    minYears: 31,
+    maxYears: 50,
     referenceType: "ai",
-    recommended: 8400,
-    lowerSafe: 6300,
-    upperSafe: 12600,
+    recommended: 10041.6,
+    lowerSafe: 7531.2,
+    upperSafe: 14225.6,
     upperLimit: null,
     unit: "kJ",
-    source: "DRI",
+    source: "Heuristic (male 31–50; kcal × 4.184)",
+  },
+  {
+    nutrientKey: "energy_kj",
+    sex: "male",
+    minYears: 51,
+    maxYears: 70,
+    referenceType: "ai",
+    recommended: 9204.8,
+    lowerSafe: 7112.8,
+    upperSafe: 13388.8,
+    upperLimit: null,
+    unit: "kJ",
+    source: "Heuristic (male 51–70; kcal × 4.184)",
+  },
+  {
+    nutrientKey: "energy_kj",
+    sex: "male",
+    minYears: 71,
+    maxYears: null,
+    referenceType: "ai",
+    recommended: 8368,
+    lowerSafe: 6694.4,
+    upperSafe: 12552,
+    upperLimit: null,
+    unit: "kJ",
+    source: "Heuristic (male 71+; kcal × 4.184)",
+  },
+
+  // -----------------
+  // WOMEN (kJ) (kcal × 4.184)
+  // -----------------
+  {
+    nutrientKey: "energy_kj",
+    sex: "female",
+    minYears: 19,
+    maxYears: 30,
+    referenceType: "ai",
+    recommended: 8368,
+    lowerSafe: 6276,
+    upperSafe: 12552,
+    upperLimit: null,
+    unit: "kJ",
+    source: "Heuristic (female 19–30; kcal × 4.184)",
+  },
+  {
+    nutrientKey: "energy_kj",
+    sex: "female",
+    minYears: 31,
+    maxYears: 50,
+    referenceType: "ai",
+    recommended: 7531.2,
+    lowerSafe: 5857.6,
+    upperSafe: 11715.2,
+    upperLimit: null,
+    unit: "kJ",
+    source: "Heuristic (female 31–50; kcal × 4.184)",
+  },
+  {
+    nutrientKey: "energy_kj",
+    sex: "female",
+    minYears: 51,
+    maxYears: 70,
+    referenceType: "ai",
+    recommended: 7112.8,
+    lowerSafe: 5439.2,
+    upperSafe: 10878.4,
+    upperLimit: null,
+    unit: "kJ",
+    source: "Heuristic (female 51–70; kcal × 4.184)",
+  },
+  {
+    nutrientKey: "energy_kj",
+    sex: "female",
+    minYears: 71,
+    maxYears: null,
+    referenceType: "ai",
+    recommended: 6694.4,
+    lowerSafe: 5020.8,
+    upperSafe: 10041.6,
+    upperLimit: null,
+    unit: "kJ",
+    source: "Heuristic (female 71+; kcal × 4.184)",
   },
 
   // Carbohydrate (digestible)
@@ -250,9 +450,10 @@ export const driV1Bands = [
   { nutrientKey: "fiber_g", sex: "male", minYears: 19, maxYears: 50, referenceType: "ai", recommended: 38, lowerSafe: 30, upperSafe: null, upperLimit: null, unit: "g", source: "DRI" },
   { nutrientKey: "fiber_g", sex: "female", minYears: 19, maxYears: 50, referenceType: "ai", recommended: 25, lowerSafe: 20, upperSafe: null, upperLimit: null, unit: "g", source: "DRI" },
 
-  // Water
-  { nutrientKey: "water_g", sex: "male", minYears: 19, maxYears: null, referenceType: "ai", recommended: 3700, lowerSafe: 3000, upperSafe: null, upperLimit: null, unit: "g", source: "DRI" },
-  { nutrientKey: "water_g", sex: "female", minYears: 19, maxYears: null, referenceType: "ai", recommended: 2700, lowerSafe: 2200, upperSafe: null, upperLimit: null, unit: "g", source: "DRI" },
+  // Water (align to stored daily totals: water_total_ml)
+  // DRI AI values are typically expressed in mL/day (numerically equivalent to g/day for water).
+  { nutrientKey: "water_total_ml", sex: "male", minYears: 19, maxYears: null, referenceType: "ai", recommended: 3700, lowerSafe: 3000, upperSafe: null, upperLimit: null, unit: "ml", source: "DRI" },
+  { nutrientKey: "water_total_ml", sex: "female", minYears: 19, maxYears: null, referenceType: "ai", recommended: 2700, lowerSafe: 2200, upperSafe: null, upperLimit: null, unit: "ml", source: "DRI" },
 
   // -----------------
   // VITAMINS
@@ -367,9 +568,10 @@ export const driV1Bands = [
   // Betaine (informational)
   { nutrientKey: "betaine_mg", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "mg", source: "No specific DRI for betaine (informational tracking)" },
 
-  // Fluoride
-  { nutrientKey: "fluoride_mg", sex: "male", minYears: 19, maxYears: null, referenceType: "ai", recommended: 4.0, lowerSafe: 3.0, upperSafe: null, upperLimit: 10.0, unit: "mg", source: "DRI" },
-  { nutrientKey: "fluoride_mg", sex: "female", minYears: 19, maxYears: null, referenceType: "ai", recommended: 3.0, lowerSafe: 2.5, upperSafe: null, upperLimit: 10.0, unit: "mg", source: "DRI" },
+  // Fluoride (align to stored daily totals: fluoride_ug)
+  // DRI values are commonly listed in mg/day; convert to µg/day for storage alignment.
+  { nutrientKey: "fluoride_ug", sex: "male", minYears: 19, maxYears: null, referenceType: "ai", recommended: 4000, lowerSafe: 3000, upperSafe: null, upperLimit: 10000, unit: "µg", source: "DRI" },
+  { nutrientKey: "fluoride_ug", sex: "female", minYears: 19, maxYears: null, referenceType: "ai", recommended: 3000, lowerSafe: 2500, upperSafe: null, upperLimit: 10000, unit: "µg", source: "DRI" },
 ];
 
 // Default export for consumers that `import dri_v1 from ...`
