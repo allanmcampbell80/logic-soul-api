@@ -1200,7 +1200,7 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
   // - byFieldAll includes ALL contributions regardless of estimated/confidence
   // - byFieldMain includes only non-estimated contributions
   // - byFieldEstimated includes only estimated contributions
-  function computeContributionMapsForFood(food, grams, servings) {
+  function computeContributionMapsForFood(food, grams, servings, opts = {}) {
     const byFieldAll = {};
     const byFieldMain = {};
     const byFieldEstimated = {};
@@ -1241,7 +1241,34 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
         const src = toUnitString(nutrient.source).toLowerCase();
         const dq = toUnitString(nutrient.dataQuality ?? nutrient.data_quality).toLowerCase();
         const conf = toNumber(nutrient.confidence);
-        const isEstimated = src === "off" || dq === "off" || (conf != null && conf < 0.9);
+        const isEstimated =
+          nutrient?.is_estimated === true ||
+          nutrient?.isEstimated === true ||
+          src === "off" ||
+          dq === "off" ||
+          (conf != null && conf < 0.9);
+
+        // --- Policy rules ---
+        // 1) Never pull energy (kcal/kJ) into the estimated bucket.
+        // These should come from the label/primary dataset.
+        if (isEstimated && (nutrientKey === "energy_kcal" || nutrientKey === "energy_kj")) {
+          continue;
+        }
+
+        // 2) When a USDA equivalent exists for the food, do NOT use ingredient-based
+        // estimated nutrients for the primary food (we prefer USDA enrichment instead).
+        const suppressIngredientEstimates = opts && opts.suppressIngredientEstimates === true;
+        if (suppressIngredientEstimates && isEstimated) {
+          const isIngredientBased =
+            src.includes("ingredient") ||
+            src.includes("inferred_from_ingredients") ||
+            dq.includes("ingredient") ||
+            dq.includes("recipe_estimate") ||
+            dq.includes("ingredients_estimate");
+          if (isIngredientBased) {
+            continue;
+          }
+        }
 
         let contribution = null;
         if (servings && typeof perServing === "number") {
@@ -1279,6 +1306,8 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
 
   function addDeltaIntoEstimated(primaryAll, usdaAll) {
     for (const field of Object.keys(totals)) {
+      // Never estimate energy from USDA enrichment.
+      if (field === "energy_kcal" || field === "energy_kj") continue;
       const hasPrimary = Object.prototype.hasOwnProperty.call(primaryAll || {}, field);
       const hasUsda = Object.prototype.hasOwnProperty.call(usdaAll || {}, field);
 
@@ -1310,14 +1339,22 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     const grams = Number(entry.grams || 0);
     const servings = Number(entry.servings || 0);
 
-    const primaryMaps = computeContributionMapsForFood(primaryFood, grams, servings);
+    const hasUsdaEq = Boolean(entry.usdaEquivalentFoodIdStr);
+    const useUsdaEq = Boolean(entry.useUSDAEquivalent);
+    const applyUsdaEnrichment = hasUsdaEq && useUsdaEq;
+
+    // Only suppress ingredient-based estimated nutrients when the user has opted into USDA enrichment.
+    const primaryMaps = computeContributionMapsForFood(primaryFood, grams, servings, {
+      suppressIngredientEstimates: applyUsdaEnrichment,
+    });
 
     // Add primary contributions into their respective buckets
     addMapInto(addToTotals, primaryMaps.byFieldMain);
     addMapInto(addToTotalsEstimated, primaryMaps.byFieldEstimated);
 
-    // If user chose USDA equivalent, add ONLY the positive difference (USDA - primary) into estimated
-    if (entry.useUSDAEquivalent && entry.usdaEquivalentFoodIdStr) {
+    // Only enrich estimates from USDA when the user explicitly enabled it.
+    // This does NOT change the primary (label/OCR) totals; it only enriches the estimated bucket.
+    if (applyUsdaEnrichment) {
       const usdaFood = foodsById.get(entry.usdaEquivalentFoodIdStr);
       if (usdaFood) {
         const usdaMaps = computeContributionMapsForFood(usdaFood, grams, servings);
