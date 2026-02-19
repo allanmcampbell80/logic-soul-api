@@ -1306,25 +1306,32 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     }
   }
 
-  function addDeltaIntoEstimated(primaryAll, usdaAll) {
+  function addDeltaIntoEstimated(primaryAll, primaryMain, usdaAll) {
     for (const field of Object.keys(totals)) {
       // Never estimate energy from USDA enrichment.
       if (field === "energy_kcal" || field === "energy_kj") continue;
-      const hasPrimary = Object.prototype.hasOwnProperty.call(primaryAll || {}, field);
+
+      const hasPrimaryAny = Object.prototype.hasOwnProperty.call(primaryAll || {}, field);
+      const hasPrimaryTruth = Object.prototype.hasOwnProperty.call(primaryMain || {}, field);
       const hasUsda = Object.prototype.hasOwnProperty.call(usdaAll || {}, field);
 
-      const p = hasPrimary ? Number(primaryAll?.[field]) : 0;
+      const pAny = hasPrimaryAny ? Number(primaryAll?.[field]) : 0;
       const u = hasUsda ? Number(usdaAll?.[field]) : 0;
+
+      // --- Truth beats estimates ---
+      // If the PRIMARY food provides a non-estimated (truth) value for this nutrient,
+      // never add an estimated enrichment/delta for it.
+      if (hasPrimaryTruth) continue;
 
       // If USDA has a value but the primary food doesn't provide this nutrient at all,
       // treat the USDA value as an estimated enrichment.
-      if (!hasPrimary && hasUsda && Number.isFinite(u) && u > 0) {
+      if (!hasPrimaryAny && hasUsda && Number.isFinite(u) && u > 0) {
         addToTotalsEstimated(field, u);
         continue;
       }
 
       // Otherwise, only add the positive delta (USDA - primary).
-      const delta = u - p;
+      const delta = u - pAny;
       if (Number.isFinite(delta) && delta > 0) {
         addToTotalsEstimated(field, delta);
       }
@@ -1352,7 +1359,15 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
 
     // Add primary contributions into their respective buckets
     addMapInto(addToTotals, primaryMaps.byFieldMain);
-    addMapInto(addToTotalsEstimated, primaryMaps.byFieldEstimated);
+
+    // --- Truth beats estimates ---
+    // Never add estimated values for a nutrient if we already have a non-estimated (truth) value for it.
+    const gatedEstimated = {};
+    for (const [field, value] of Object.entries(primaryMaps.byFieldEstimated || {})) {
+      if (Object.prototype.hasOwnProperty.call(primaryMaps.byFieldMain || {}, field)) continue;
+      gatedEstimated[field] = value;
+    }
+    addMapInto(addToTotalsEstimated, gatedEstimated);
 
     // Only enrich estimates from USDA when the user explicitly enabled it.
     // This does NOT change the primary (label/OCR) totals; it only enriches the estimated bucket.
@@ -1360,7 +1375,7 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
       const usdaFood = foodsById.get(entry.usdaEquivalentFoodIdStr);
       if (usdaFood) {
         const usdaMaps = computeContributionMapsForFood(usdaFood, grams, servings);
-        addDeltaIntoEstimated(primaryMaps.byFieldAll, usdaMaps.byFieldAll);
+        addDeltaIntoEstimated(primaryMaps.byFieldAll, primaryMaps.byFieldMain, usdaMaps.byFieldAll);
       }
     }
   }
@@ -1834,5 +1849,6 @@ export async function deleteUserMeal(db, userId, mealId) {
     dateKey: dateKey || null,
   };
 }
+
 
 
