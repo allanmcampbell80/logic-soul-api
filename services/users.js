@@ -1233,6 +1233,22 @@ function defaultUnitForKey(key) {
   return null;
 }
 
+// Derive macro gram targets from daily energy using AMDR-style midpoints.
+// Carbs: 45–65% -> 55%, Fat: 20–35% -> 27.5%, Protein: 10–35% -> 17.5%
+function computeMacroGramsFromEnergyKcal(energyKcal) {
+  const kcal = typeof energyKcal === "number" && Number.isFinite(energyKcal) && energyKcal > 0 ? energyKcal : 2000;
+
+  const pctCarbs = 0.55;
+  const pctFat = 0.275;
+  const pctProtein = 0.175;
+
+  const carbsG = Math.round(((kcal * pctCarbs) / 4) * 10) / 10;      // 4 kcal/g
+  const fatG = Math.round(((kcal * pctFat) / 9) * 10) / 10;          // 9 kcal/g
+  const proteinG = Math.round(((kcal * pctProtein) / 4) * 10) / 10;  // 4 kcal/g
+
+  return { carbsG, fatG, proteinG };
+}
+
 function buildDefaultDailyGoalsFromProfile({ age, gender, heightCm, weightKg }) {
   // Keep this intentionally simple to start. We can expand bands later.
   const sex = inferSexFromGender(gender);
@@ -1287,20 +1303,6 @@ function buildDefaultDailyGoalsFromProfile({ age, gender, heightCm, weightKg }) 
   //  - Fat:   20–35%  -> midpoint 27.5%
   //  - Protein:10–35% -> midpoint 17.5%
   // These sum to 100% (55 + 27.5 + 17.5).
-  function computeMacroGramsFromEnergyKcal(energyKcal) {
-    const kcal = typeof energyKcal === "number" && Number.isFinite(energyKcal) && energyKcal > 0 ? energyKcal : 2000;
-
-    const pctCarbs = 0.55;
-    const pctFat = 0.275;
-    const pctProtein = 0.175;
-
-    const carbsG = Math.round(((kcal * pctCarbs) / 4) * 10) / 10;      // 4 kcal/g
-    const fatG = Math.round(((kcal * pctFat) / 9) * 10) / 10;          // 9 kcal/g
-    const proteinG = Math.round(((kcal * pctProtein) / 4) * 10) / 10;  // 4 kcal/g
-
-    return { carbsG, fatG, proteinG };
-  }
-
   const { carbsG, fatG, proteinG } = computeMacroGramsFromEnergyKcal(goals.energy_kcal.value);
 
   goals.protein_g = { value: proteinG, unit: "g" };
@@ -1487,6 +1489,9 @@ export async function patchUserDailyGoals(db, userId, patch) {
   const patchObj =
     patch && typeof patch === "object" && !Array.isArray(patch) ? patch : {};
 
+  // Track which keys are being patched
+  const patchedKeys = new Set(Object.keys(patchObj || {}).map((k) => String(k || "").trim()).filter(Boolean));
+
   // Build $set ops targeting nested fields ONLY (avoid Mongo path conflicts)
   const setOps = {};
   for (const [k, v] of Object.entries(patchObj)) {
@@ -1505,6 +1510,46 @@ export async function patchUserDailyGoals(db, userId, patch) {
     if (unit) setOps[`dailyGoals.goals.${key}.unit`] = unit;
   }
 
+  // If user updated energy but did NOT explicitly set macros, keep macros in sync with energy
+  // for legacy users where macros were stored as default values.
+  const energyWasPatched = patchedKeys.has("energy_kcal") || patchedKeys.has("energy_kj");
+  const macrosWerePatched = patchedKeys.has("protein_g") || patchedKeys.has("carbs_g") || patchedKeys.has("fat_g");
+
+  if (energyWasPatched && !macrosWerePatched) {
+    // Determine the new kcal value to base macros on
+    let newKcal = null;
+    if (patchedKeys.has("energy_kcal")) {
+      newKcal = validateDailyGoalUpdate("energy_kcal", patchObj.energy_kcal);
+    } else if (patchedKeys.has("energy_kj")) {
+      const kj = validateDailyGoalUpdate("energy_kj", patchObj.energy_kj);
+      newKcal = Math.round(kj / 4.184);
+    }
+
+    if (typeof newKcal === "number" && Number.isFinite(newKcal) && newKcal > 0) {
+      const { carbsG, fatG, proteinG } = computeMacroGramsFromEnergyKcal(newKcal);
+
+      const storedSource = existing?.dailyGoals?.source ?? null;
+      const hasStoredProtein = existing?.dailyGoals?.goals?.protein_g?.value != null;
+      const hasStoredCarbs = existing?.dailyGoals?.goals?.carbs_g?.value != null;
+      const hasStoredFat = existing?.dailyGoals?.goals?.fat_g?.value != null;
+
+      // Only auto-update macros when they look like legacy defaults (storedSource === "default").
+      // If the user previously customized macros (source becomes "user"), we respect their override.
+      if (storedSource === "default" || (!storedSource && (hasStoredProtein || hasStoredCarbs || hasStoredFat))) {
+        const unitG = "g";
+
+        setOps[`dailyGoals.goals.protein_g.value`] = proteinG;
+        setOps[`dailyGoals.goals.protein_g.unit`] = existing?.dailyGoals?.goals?.protein_g?.unit ?? unitG;
+
+        setOps[`dailyGoals.goals.carbs_g.value`] = carbsG;
+        setOps[`dailyGoals.goals.carbs_g.unit`] = existing?.dailyGoals?.goals?.carbs_g?.unit ?? unitG;
+
+        setOps[`dailyGoals.goals.fat_g.value`] = fatG;
+        setOps[`dailyGoals.goals.fat_g.unit`] = existing?.dailyGoals?.goals?.fat_g?.unit ?? unitG;
+      }
+    }
+  }
+
   if (Object.keys(setOps).length === 0) {
     const err = new Error("No valid numeric fields to patch");
     err.statusCode = 400;
@@ -1513,7 +1558,11 @@ export async function patchUserDailyGoals(db, userId, patch) {
 
   const now = new Date();
   setOps["dailyGoals.updatedAt"] = now;
-  setOps["dailyGoals.source"] = "user";
+  // Preserve legacy "default" source unless the user explicitly patched something non-energy.
+  // If they changed energy only, we still treat it as a user override, but we don’t want to
+  // incorrectly preserve stale legacy macro defaults.
+  const existingSource = existing?.dailyGoals?.source ?? null;
+  setOps["dailyGoals.source"] = existingSource === "default" ? "user" : "user";
 
   // IMPORTANT: Never $set the whole dailyGoals object here.
   await usersCol.updateOne({ _id: userObjectId }, { $set: setOps });
