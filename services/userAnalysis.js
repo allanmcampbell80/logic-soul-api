@@ -266,13 +266,27 @@ function isInputKey(k) {
 
 function extractDayInputs(dayDoc) {
   const x = {};
-  const totals = dayDoc && typeof dayDoc.totals === "object" ? dayDoc.totals : {};
 
-  // Numeric totals → inputs (exclude outcomes)
-  for (const [k, v] of Object.entries(totals)) {
-    if (!isInputKey(k)) continue;
-    if (isFiniteNumber(v)) x[k] = v;
-  }
+  const totalsMain = dayDoc && typeof dayDoc.totals === "object" ? dayDoc.totals : {};
+  const totalsEstimated = dayDoc && typeof dayDoc.totals_estimated === "object" ? dayDoc.totals_estimated : {};
+
+  // Merge numeric totals → inputs (exclude outcomes).
+  // IMPORTANT: include totals_estimated because many micronutrients (especially CA label-side) may arrive there.
+  const ingestTotalsObject = (totalsObj) => {
+    for (const [rawKey, rawVal] of Object.entries(totalsObj || {})) {
+      const key = canonicalizeNutrientKey(rawKey);
+      if (!isInputKey(key)) continue;
+
+      const n = typeof rawVal === "number" ? rawVal : Number(rawVal);
+      if (!Number.isFinite(n)) continue;
+
+      // Sum duplicates (safe for alias-canonicalization and merging estimated + main)
+      x[key] = (x[key] || 0) + n;
+    }
+  };
+
+  ingestTotalsObject(totalsMain);
+  ingestTotalsObject(totalsEstimated);
 
   // Ingredients exposure → sparse inputs (counts)
   const ing = dayDoc && typeof dayDoc.ingredients_exposure === "object" ? dayDoc.ingredients_exposure : null;
@@ -290,6 +304,7 @@ function extractDayInputs(dayDoc) {
 }
 
 function extractDayOutcomes(dayDoc) {
+  // Outcomes (checkins) should always come from main totals, not totals_estimated.
   const totals = dayDoc && typeof dayDoc.totals === "object" ? dayDoc.totals : {};
   const y = {};
   for (const k of ["checkin_mood", "checkin_clarity_score", "checkin_pain_peak", "checkin_pain_region_count", "checkin_energy"]) {
