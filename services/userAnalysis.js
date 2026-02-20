@@ -396,6 +396,7 @@ function defaultDailyGoals() {
     sat_fat_g: 20,
     caffeine_mg: 400,
     water_total_ml: 2000,
+    sleep_hours: 8,
   };
 }
 
@@ -624,6 +625,11 @@ function canonicalizeNutrientKey(k) {
 
     // added sugars variants (prefer added_sugars_g)
     added_sugars: "added_sugars_g",
+
+    // sleep variants
+    sleep: "sleep_hours",
+    sleephours: "sleep_hours",
+    sleep_hours: "sleep_hours",
   };
 
   const lower = key.toLowerCase();
@@ -1367,3 +1373,4 @@ async function ensureFreshDailyRoundupPack(db, { userId, dateKey, existingPack }
     return existingPack || null;
   }
 }
+
