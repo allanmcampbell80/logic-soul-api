@@ -1260,13 +1260,24 @@ export async function fetchUserDayAnalysisPack(db, { userId, dateKey, algorithmV
     userIdFilters.push({ userId: userIdStr });
   }
 
-  const doc = await packsCol.findOne({
+  let doc = await packsCol.findOne({
     $and: [
       { $or: userIdFilters },
       { dateKey: dateKeyRaw },
       { algorithmVersion: algo },
     ],
   });
+
+  // If the client is fetching the daily roundup pack, make sure it isn't stale.
+  // This handles cases where the roundup was computed earlier in the day (with few/no totals)
+  // and then the user logged meals later.
+  if (algo === "daily_roundup_v1") {
+    doc = await ensureFreshDailyRoundupPack(db, {
+      userId: userIdRaw,
+      dateKey: dateKeyRaw,
+      existingPack: doc,
+    });
+  }
 
   if (!doc) return null;
 
@@ -1275,4 +1286,69 @@ export async function fetchUserDayAnalysisPack(db, { userId, dateKey, algorithmV
   if (out && out.userId && typeof out.userId === "object") out.userId = String(out.userId);
   delete out._id;
   return out;
+}
+
+// Ensures the daily roundup pack is fresh: if totals are updated after the pack, recompute.
+async function ensureFreshDailyRoundupPack(db, { userId, dateKey, existingPack }) {
+  try {
+    if (!db) return existingPack || null;
+
+    const userIdStr = String(userId || "").trim();
+    const dateKeyStr = String(dateKey || "").trim();
+    if (!userIdStr || !dateKeyStr) return existingPack || null;
+
+    const packsCol = db.collection("user_analysis_correlation_packs");
+    const totalsCol = db.collection("user_daily_totals");
+
+    // Fetch totals for that day (userId may be stored as string or ObjectId)
+    const userIdFilters = buildUserIdFilters(userIdStr);
+    const totalsDoc = await totalsCol.findOne({
+      $and: [{ $or: userIdFilters }, { dateKey: dateKeyStr }],
+    });
+
+    if (!totalsDoc) return existingPack || null;
+
+    const totalsUpdatedAt = totalsDoc.updatedAt || totalsDoc.createdAt || null;
+    const packUpdatedAt = existingPack?.updatedAt || existingPack?.createdAt || null;
+
+    const existingCount = Number.isFinite(Number(existingPack?.storedCount)) ? Number(existingPack.storedCount) : null;
+    const isEmptyPack = existingCount === 0 || (Array.isArray(existingPack?.candidates) && existingPack.candidates.length === 0);
+
+    const isStaleByTime =
+      totalsUpdatedAt && packUpdatedAt ? new Date(packUpdatedAt).getTime() < new Date(totalsUpdatedAt).getTime() : false;
+
+    // Recompute if:
+    // - pack doesn't exist yet
+    // - pack exists but is empty
+    // - totals changed after pack was last computed
+    const shouldRecompute = !existingPack || isEmptyPack || isStaleByTime;
+
+    if (!shouldRecompute) return existingPack;
+
+    // Recompute roundup candidates for this dateKey
+    const dayDoc = {
+      ...totalsDoc,
+      dateKey: dateKeyStr,
+    };
+
+    const targets = await getDailyTargetsForUser(db, userIdStr);
+    const goals = targets && targets.goals ? targets.goals : await getDailyGoalsForUser(db, userIdStr);
+    const bandsByKey = targets && targets.bands ? targets.bands : null;
+
+    await storeDailyRoundupPack(db, userIdStr, dayDoc, goals, bandsByKey);
+
+    // Re-fetch the freshly stored pack
+    const refreshed = await packsCol.findOne({
+      $and: [
+        { $or: buildUserIdFilters(userIdStr) },
+        { dateKey: dateKeyStr },
+        { algorithmVersion: "daily_roundup_v1" },
+      ],
+    });
+
+    return refreshed || existingPack || null;
+  } catch {
+    // Never break the request path; just fall back to existing.
+    return existingPack || null;
+  }
 }
