@@ -233,48 +233,82 @@ export const driV1Bands = [
     source: "Heuristic (female 71+; kcal × 4.184)",
   },
 
-  // Carbohydrate (digestible)
+  // -----------------
+  // MACROS (AMDR-based; derived from energy)
+  // -----------------
+  // Scientifically accepted macro guidance is typically expressed as AMDR % of total calories:
+  // - Carbohydrate: 45–65% of calories
+  // - Fat: 20–35% of calories
+  // - Protein: 10–35% of calories
+  // We store a reasonable midpoint as a default, but IMPORTANT: these are meant to be
+  // DERIVED from the user's resolved energy_kcal target at runtime.
+  //
+  // Derivation formula:
+  //   grams = (energy_kcal_target * pct) / kcalPerGram
+  // where kcalPerGram is 4 for carbs/protein and 9 for fat.
+  //
+  // NOTE: The numeric recommended/lowerSafe/upperSafe values below are *fallbacks* computed
+  // for a 2000 kcal day so existing code paths that expect numbers keep working.
+  // Your target resolver should override these using `derivedFromEnergyKcalKey` + pct fields.
 
   {
     nutrientKey: "carbs_g",
     sex: null,
     minYears: 19,
     maxYears: null,
-    referenceType: "rda",
-    recommended: 130,
-    lowerSafe: 104,
-    upperSafe: null,
+    referenceType: "amdr",
+    // Midpoint 55% (within 45–65)
+    recommended: 275, // 2000 * 0.55 / 4
+    lowerSafe: 225,   // 2000 * 0.45 / 4
+    upperSafe: 325,   // 2000 * 0.65 / 4
     upperLimit: null,
     unit: "g",
-    source: "DRI",
+    source: "AMDR (45–65% of calories)",
+    derivedFromEnergyKcalKey: "energy_kcal",
+    kcalPerGram: 4,
+    pctRecommended: 0.55,
+    pctLowerSafe: 0.45,
+    pctUpperSafe: 0.65,
   },
 
-  // Protein (adult RDA)
   {
-    nutrientKey: "protein_g",
-    sex: "male",
+    nutrientKey: "fat_g",
+    sex: null,
     minYears: 19,
-    maxYears: 50,
-    referenceType: "rda",
-    recommended: 56,
-    lowerSafe: 45,
-    upperSafe: null,
+    maxYears: null,
+    referenceType: "amdr",
+    // Midpoint 27.5% (within 20–35)
+    recommended: 61.1, // 2000 * 0.275 / 9
+    lowerSafe: 44.4,   // 2000 * 0.20 / 9
+    upperSafe: 77.8,   // 2000 * 0.35 / 9
     upperLimit: null,
     unit: "g",
-    source: "DRI",
+    source: "AMDR (20–35% of calories)",
+    derivedFromEnergyKcalKey: "energy_kcal",
+    kcalPerGram: 9,
+    pctRecommended: 0.275,
+    pctLowerSafe: 0.20,
+    pctUpperSafe: 0.35,
   },
+
   {
     nutrientKey: "protein_g",
-    sex: "female",
+    sex: null,
     minYears: 19,
-    maxYears: 50,
-    referenceType: "rda",
-    recommended: 46,
-    lowerSafe: 37,
-    upperSafe: null,
+    maxYears: null,
+    referenceType: "amdr",
+    // Midpoint 22.5% (within 10–35)
+    recommended: 112.5, // 2000 * 0.225 / 4
+    lowerSafe: 50,      // 2000 * 0.10 / 4
+    upperSafe: 175,     // 2000 * 0.35 / 4
     upperLimit: null,
     unit: "g",
-    source: "DRI",
+    source: "AMDR (10–35% of calories)",
+    derivedFromEnergyKcalKey: "energy_kcal",
+    kcalPerGram: 4,
+    pctRecommended: 0.225,
+    pctLowerSafe: 0.10,
+    pctUpperSafe: 0.35,
   },
 
   // --------------------------
@@ -319,21 +353,6 @@ export const driV1Bands = [
 { nutrientKey: "proline_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for individual amino acids (informational tracking)" },
 { nutrientKey: "serine", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for individual amino acids (informational tracking)" },
 { nutrientKey: "serine_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for individual amino acids (informational tracking)" },
-
-  // Total Fat (AMDR-style)
-  {
-    nutrientKey: "fat_g",
-    sex: null,
-    minYears: 19,
-    maxYears: null,
-    referenceType: "ai",
-    recommended: 65,
-    lowerSafe: 44,
-    upperSafe: 78,
-    upperLimit: null,
-    unit: "g",
-    source: "AMDR (assumes 2000 kcal)",
-  },
 
   // Saturated / trans / mono / poly fats
   {
