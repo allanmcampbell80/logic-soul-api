@@ -178,6 +178,8 @@ const DAILY_PANEL_NUTRIENTS = {
 
   // Other macro-adjacent
   cholesterol: { field: "cholesterol_mg", unit: "mg" },
+  // USDA "ash" = total mineral residue (g)
+  ash: { field: "ash_g", unit: "g" },
   // Water from foods (USDA reports in grams; store as mL for easy merging with user hydration)
   water: { field: "water_from_food_ml", unit: "g" },
   water_total: { field: "water_from_food_ml", unit: "g" },
@@ -1911,5 +1913,6 @@ export async function deleteUserMeal(db, userId, mealId) {
     dateKey: dateKey || null,
   };
 }
+
 
 
