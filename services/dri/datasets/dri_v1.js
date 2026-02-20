@@ -458,7 +458,7 @@ export const driV1Bands = [
   // Sleep (adult baseline guideline)
   // General adult recommendation: 7–9 hours per night
   {
-    nutrientKey: "sleep_hours",
+    nutrientKey: "checkin_sleep_hours",
     sex: null,
     minYears: 19,
     maxYears: null,
@@ -598,4 +598,3 @@ const dri_v1 = {
 };
 
 export default dri_v1;
-
