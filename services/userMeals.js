@@ -706,8 +706,10 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
     pushOff("potassium", "potassium", "g");
     pushOff("calcium", "calcium", "g");
     pushOff("iron", "iron", "g");
-    pushOff("vitamin-c", "vitamin_c", "g");
-    pushOff("vitamin-a", "vitamin_a", "g");
+    pushOff("vitamin-c", "vitamin_c", "mg");
+    pushOff("vitamin-a", "vitamin_a", "µg");
+    pushOff("vitamin-d", "vitamin_d", "µg");
+    pushOff("vitamin-e", "vitamin_e_alpha_tocopherol", "mg");
 
     return out;
   }
@@ -1208,7 +1210,7 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
   // - byFieldAll includes ALL contributions regardless of estimated/confidence
   // - byFieldMain includes only non-estimated contributions
   // - byFieldEstimated includes only estimated contributions
-  function computeContributionMapsForFood(food, grams, servings, opts = {}) {
+function computeContributionMapsForFood(food, grams, servings, opts = {}) {
     const byFieldAll = {};
     const byFieldMain = {};
     const byFieldEstimated = {};
@@ -1243,6 +1245,20 @@ export async function recomputeDailyNutritionTotals(db, userId, dateKey) {
 
         let per100g = toNumber(nutrient.per_100g ?? nutrient.per100g);
         let perServing = toNumber(nutrient.per_serving ?? nutrient.perServing);
+
+        // Special-case: Vitamin A / D sometimes arrive as IU even when we expect µg.
+        // Convert IU -> µg so we can aggregate instead of skipping as a unit mismatch.
+        // Vitamin A: 1 IU ≈ 0.3 µg RAE
+        // Vitamin D: 1 IU = 0.025 µg
+        const isVitAorD = nutrientKey === "vitamin_a" || nutrientKey === "vitamin_d";
+        const expectsMicrograms = normalizeUnit(expectedUnit) === "µg";
+        const unitIsIU = normalizeUnit(unit) === "iu";
+        if (isVitAorD && expectsMicrograms && unitIsIU) {
+          const iuToUg = nutrientKey === "vitamin_a" ? 0.3 : 0.025;
+          if (per100g != null) per100g = per100g * iuToUg;
+          if (perServing != null) perServing = perServing * iuToUg;
+          unit = "µg";
+        }
 
         if (expectedUnit && unit && String(unit) !== String(expectedUnit)) {
           const canConvert100g = per100g != null && convertIfNeeded(per100g, unit, expectedUnit) != null;
@@ -1895,6 +1911,5 @@ export async function deleteUserMeal(db, userId, mealId) {
     dateKey: dateKey || null,
   };
 }
-
 
 
