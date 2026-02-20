@@ -1823,6 +1823,50 @@ app.get("/users/:id/analysis/day-pack", async (req, res) => {
 
     const item = await fetchUserDayAnalysisPack(db, { userId: userIdRaw, dateKey, algorithmVersion });
 
+    // Debug: trace day-pack generation (helps diagnose empty candidate packs)
+    try {
+      const candCount = Array.isArray(item?.candidates) ? item.candidates.length : 0;
+      console.log("[Users/Analysis/DayPack] fetched", {
+        userId: userIdRaw,
+        dateKey,
+        algorithmVersion,
+        candCount,
+        createdAt: item?.createdAt || null,
+        updatedAt: item?.updatedAt || null,
+      });
+
+      // If the pack is empty, log whether daily totals exist for that day (best-effort)
+      if (candCount === 0) {
+        const totalsCol = db.collection("user_daily_totals");
+        const userIdValue = coerceUserIdValue(userIdRaw);
+        const userIdFilters = [{ userId: userIdValue }];
+        const userIdStr = String(userIdRaw);
+        if (userIdStr && userIdStr !== String(userIdValue)) userIdFilters.push({ userId: userIdStr });
+
+        const totalsDoc = await totalsCol.findOne(
+          { $and: [{ $or: userIdFilters }, { dateKey }] },
+          { projection: { totals: 1, totals_estimated: 1, updatedAt: 1, createdAt: 1 } }
+        );
+
+        const totalsKeys = totalsDoc?.totals && typeof totalsDoc.totals === "object" ? Object.keys(totalsDoc.totals) : [];
+        const estKeys = totalsDoc?.totals_estimated && typeof totalsDoc.totals_estimated === "object" ? Object.keys(totalsDoc.totals_estimated) : [];
+
+        console.warn("[Users/Analysis/DayPack] EMPTY candidates diagnostics", {
+          userId: userIdRaw,
+          dateKey,
+          algorithmVersion,
+          hasTotalsDoc: !!totalsDoc,
+          totalsKeyCount: totalsKeys.length,
+          totalsEstimatedKeyCount: estKeys.length,
+          totalsUpdatedAt: totalsDoc?.updatedAt || null,
+          totalsCreatedAt: totalsDoc?.createdAt || null,
+          sampleTotalsKeys: totalsKeys.slice(0, 25),
+        });
+      }
+    } catch (diagErr) {
+      console.error("[Users/Analysis/DayPack] diagnostics failed (best-effort):", diagErr);
+    }
+
     if (!item) {
       return res.status(404).json({ ok: false, error: "Not found", userId: userIdRaw, dateKey, algorithmVersion });
     }
