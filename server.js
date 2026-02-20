@@ -588,15 +588,10 @@ app.patch("/users/:id/daily-goals", async (req, res) => {
 
     const patch = (req.body && typeof req.body === "object") ? req.body : {};
 
-    // 🔎 ADD THIS LOG
-    console.log("[Users/DailyGoals/Patch] userId=", userId);
-    console.log("[Users/DailyGoals/Patch] raw body=", JSON.stringify(req.body));
-    console.log("[Users/DailyGoals/Patch] patch keys=", Object.keys(patch));
 
     const result = await patchUserDailyGoals(db, userId, patch);
 
     if (!result) {
-      console.log("[Users/DailyGoals/Patch] result = null (User not found?)");
       return res.status(404).json({ ok: false, error: "User not found" });
     }
 
@@ -1306,22 +1301,32 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
 
     const result = await patchUserDailyTotals(db, userId, dateKeyResolved, patch, tzCheckin);
 
-    // User Analysis: after each check-in update, run correlation engine + promotion (best-effort).
-    // This surfaces stable insights as early as they arrive.
+    // User Analysis: after each check-in update, run correlation engine + promotion.
+    // We *try* to await it so the client can light up UI hints immediately.
+    // If it fails, we fall back to a null summary (never fail the check-in).
+    let correlationSummary = null;
     try {
       if (db && result?.ok) {
-        runCorrelationEngineAndPromoteForUser(db, {
+        const ua = await runCorrelationEngineAndPromoteForUser(db, {
           userId: String(userId),
           windowDays: 120,
           lagDays: 1,
           minSupportDays: 4,
           topK: 150,
-        }).catch((uaErr) => {
-          console.error("[UserAnalysis/AutoRunAfterCheckIn] Failed (best-effort):", uaErr);
         });
+
+        const promotedCount = typeof ua?.promotedCount === "number" ? ua.promotedCount : 0;
+        const storedCount = typeof ua?.storedCount === "number" ? ua.storedCount : 0;
+
+        correlationSummary = {
+          storedCount,
+          promotedCount,
+          hasNewInsights: promotedCount > 0,
+        };
       }
-    } catch (uaOuterErr) {
-      console.error("[UserAnalysis/AutoRunAfterCheckIn] Unexpected error (best-effort):", uaOuterErr);
+    } catch (uaErr) {
+      console.error("[UserAnalysis/AutoRunAfterCheckIn] Failed (best-effort):", uaErr);
+      correlationSummary = null;
     }
 
     // Energy: whenever we patch a check-in, also snapshot the running energy average for that date.
@@ -1382,7 +1387,10 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
       console.error("[Users/DailyTotals/CheckIn] Daily check-in award hook error:", awardErr);
     }
 
-    return res.json(result);
+    return res.json({
+      ...result,
+      correlationSummary,
+    });
   } catch (err) {
     console.error("[Users/DailyTotals/CheckIn] Error:", err);
     const status = err.statusCode || 500;
@@ -1822,50 +1830,6 @@ app.get("/users/:id/analysis/day-pack", async (req, res) => {
     }
 
     const item = await fetchUserDayAnalysisPack(db, { userId: userIdRaw, dateKey, algorithmVersion });
-
-    // Debug: trace day-pack generation (helps diagnose empty candidate packs)
-    try {
-      const candCount = Array.isArray(item?.candidates) ? item.candidates.length : 0;
-      console.log("[Users/Analysis/DayPack] fetched", {
-        userId: userIdRaw,
-        dateKey,
-        algorithmVersion,
-        candCount,
-        createdAt: item?.createdAt || null,
-        updatedAt: item?.updatedAt || null,
-      });
-
-      // If the pack is empty, log whether daily totals exist for that day (best-effort)
-      if (candCount === 0) {
-        const totalsCol = db.collection("user_daily_totals");
-        const userIdValue = coerceUserIdValue(userIdRaw);
-        const userIdFilters = [{ userId: userIdValue }];
-        const userIdStr = String(userIdRaw);
-        if (userIdStr && userIdStr !== String(userIdValue)) userIdFilters.push({ userId: userIdStr });
-
-        const totalsDoc = await totalsCol.findOne(
-          { $and: [{ $or: userIdFilters }, { dateKey }] },
-          { projection: { totals: 1, totals_estimated: 1, updatedAt: 1, createdAt: 1 } }
-        );
-
-        const totalsKeys = totalsDoc?.totals && typeof totalsDoc.totals === "object" ? Object.keys(totalsDoc.totals) : [];
-        const estKeys = totalsDoc?.totals_estimated && typeof totalsDoc.totals_estimated === "object" ? Object.keys(totalsDoc.totals_estimated) : [];
-
-        console.warn("[Users/Analysis/DayPack] EMPTY candidates diagnostics", {
-          userId: userIdRaw,
-          dateKey,
-          algorithmVersion,
-          hasTotalsDoc: !!totalsDoc,
-          totalsKeyCount: totalsKeys.length,
-          totalsEstimatedKeyCount: estKeys.length,
-          totalsUpdatedAt: totalsDoc?.updatedAt || null,
-          totalsCreatedAt: totalsDoc?.createdAt || null,
-          sampleTotalsKeys: totalsKeys.slice(0, 25),
-        });
-      }
-    } catch (diagErr) {
-      console.error("[Users/Analysis/DayPack] diagnostics failed (best-effort):", diagErr);
-    }
 
     if (!item) {
       return res.status(404).json({ ok: false, error: "Not found", userId: userIdRaw, dateKey, algorithmVersion });
