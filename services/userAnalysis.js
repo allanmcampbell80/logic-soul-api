@@ -396,7 +396,6 @@ function defaultDailyGoals() {
     sat_fat_g: 20,
     caffeine_mg: 400,
     water_total_ml: 2000,
-    sleep_hours: 8,
   };
 }
 
