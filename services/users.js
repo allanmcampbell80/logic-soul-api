@@ -1244,25 +1244,42 @@ function buildDefaultDailyGoalsFromProfile({ age, gender }) {
 
   const goals = {};
 
+  // --- Macro defaults derived from energy (AMDR-style) ---
+  // We compute "recommended" macro grams from a percentage of total calories.
+  // Using midpoints of AMDR ranges for adults:
+  //  - Carbs: 45–65%  -> midpoint 55%
+  //  - Fat:   20–35%  -> midpoint 27.5%
+  //  - Protein:10–35% -> midpoint 17.5%
+  // These sum to 100% (55 + 27.5 + 17.5).
+  function computeMacroGramsFromEnergyKcal(energyKcal) {
+    const kcal = typeof energyKcal === "number" && Number.isFinite(energyKcal) && energyKcal > 0 ? energyKcal : 2000;
+
+    const pctCarbs = 0.55;
+    const pctFat = 0.275;
+    const pctProtein = 0.175;
+
+    const carbsG = Math.round(((kcal * pctCarbs) / 4) * 10) / 10;      // 4 kcal/g
+    const fatG = Math.round(((kcal * pctFat) / 9) * 10) / 10;          // 9 kcal/g
+    const proteinG = Math.round(((kcal * pctProtein) / 4) * 10) / 10;  // 4 kcal/g
+
+    return { carbsG, fatG, proteinG };
+  }
+
   goals.energy_kcal = { value: 2000, unit: "kcal" };
   goals.energy_kj = { value: 8400, unit: "kJ" };
 
   // Hydration baseline (canonical totals key)
   goals.water_total_ml = { value: 2000, unit: "ml" };
 
-  if (isAdult && sex === "male") {
-    goals.protein_g = { value: 56, unit: "g" };
-  } else if (isAdult && sex === "female") {
-    goals.protein_g = { value: 46, unit: "g" };
-  } else {
-    goals.protein_g = { value: 50, unit: "g" };
-  }
+  // Macros: derive from energy_kcal by default (user overrides can replace these via stored dailyGoals)
+  const { carbsG, fatG, proteinG } = computeMacroGramsFromEnergyKcal(goals.energy_kcal.value);
 
-  // DRI-ish macro baselines
-  goals.carbs_g = { value: 130, unit: "g" };
+  goals.protein_g = { value: proteinG, unit: "g" };
+  goals.carbs_g = { value: carbsG, unit: "g" };
+  goals.fat_g = { value: fatG, unit: "g" };
+
   goals.fiber_g = { value: 28, unit: "g" };
   goals.sugars_g = { value: 50, unit: "g" };
-  goals.fat_g = { value: 65, unit: "g" };
   goals.sat_fat_g = { value: 22, unit: "g" };
   goals.trans_fat_g = { value: 0, unit: "g" };
 
