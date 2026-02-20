@@ -1275,6 +1275,33 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
     const userIdValue = coerceUserIdValue(userId);
     const { dateKey, patch, timezone, pain_regions, painRegions, pain_details, painDetails } = req.body || {};
 
+    // Normalize check-in patch keys (keep server resilient to client naming changes)
+    const patchObj = (patch && typeof patch === "object") ? { ...patch } : {};
+
+    // Sleep: accept a few possible client keys and store consistently as `sleep_hours`
+    // (0–12 hours, float allowed)
+    try {
+      const rawSleep =
+        patchObj.sleep_hours ??
+        patchObj.sleepHours ??
+        patchObj.sleep_hours_last_night ??
+        patchObj.sleepHoursLastNight ??
+        null;
+
+      const sleepNum = typeof rawSleep === "number" ? rawSleep : (rawSleep != null ? Number(rawSleep) : null);
+      if (sleepNum != null && Number.isFinite(sleepNum)) {
+        const clamped = Math.max(0, Math.min(12, sleepNum));
+        patchObj.sleep_hours = clamped;
+      }
+
+      // Remove alt keys so we don't store duplicates under multiple names
+      delete patchObj.sleepHours;
+      delete patchObj.sleep_hours_last_night;
+      delete patchObj.sleepHoursLastNight;
+    } catch {
+      // ignore
+    }
+
     // Enforce logical-day dateKey (3am→3am) from now on for check-ins.
     // If the client provided a valid dateKey, keep it. Otherwise compute from now + timezone.
     const tzCheckinRaw = typeof timezone === "string" ? timezone.trim() : "";
@@ -1299,7 +1326,7 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
         ? painDetails
         : null;
 
-    const result = await patchUserDailyTotals(db, userId, dateKeyResolved, patch, tzCheckin);
+    const result = await patchUserDailyTotals(db, userId, dateKeyResolved, patchObj, tzCheckin);
 
     // User Analysis: after each check-in update, run correlation engine + promotion.
     // We *try* to await it so the client can light up UI hints immediately.
@@ -1534,6 +1561,7 @@ app.get("/user-analysis/debug-window", async (req, res) => {
       const painPeak = t.checkin_pain_peak;
       const outside = t.checkin_outside_minutes;
       const exercise = t.checkin_exercise;
+      const sleepHours = t.sleep_hours;
 
       // Consider the day “output-ready” if any check-in signal exists.
       return (
@@ -1541,7 +1569,8 @@ app.get("/user-analysis/debug-window", async (req, res) => {
         (typeof clarity === "number" && Number.isFinite(clarity)) ||
         (typeof painPeak === "number" && Number.isFinite(painPeak)) ||
         (typeof outside === "number" && Number.isFinite(outside)) ||
-        (typeof exercise === "number" && Number.isFinite(exercise))
+        (typeof exercise === "number" && Number.isFinite(exercise)) ||
+        (typeof sleepHours === "number" && Number.isFinite(sleepHours))
       );
     };
 
