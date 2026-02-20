@@ -455,6 +455,22 @@ export const driV1Bands = [
   { nutrientKey: "water_total_ml", sex: "male", minYears: 19, maxYears: null, referenceType: "ai", recommended: 3700, lowerSafe: 3000, upperSafe: null, upperLimit: null, unit: "ml", source: "DRI" },
   { nutrientKey: "water_total_ml", sex: "female", minYears: 19, maxYears: null, referenceType: "ai", recommended: 2700, lowerSafe: 2200, upperSafe: null, upperLimit: null, unit: "ml", source: "DRI" },
 
+  // Sleep (adult baseline guideline)
+  // General adult recommendation: 7–9 hours per night
+  {
+    nutrientKey: "sleep_hours",
+    sex: null,
+    minYears: 19,
+    maxYears: null,
+    referenceType: "ai",
+    recommended: 8,
+    lowerSafe: 7,
+    upperSafe: 9,
+    upperLimit: null,
+    unit: "h",
+    source: "Consensus guideline (7–9 hours per night for adults)",
+  },
+
   // -----------------
   // VITAMINS
   // -----------------
