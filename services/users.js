@@ -1233,17 +1233,53 @@ function defaultUnitForKey(key) {
   return null;
 }
 
-function buildDefaultDailyGoalsFromProfile({ age, gender }) {
+function buildDefaultDailyGoalsFromProfile({ age, gender, heightCm, weightKg }) {
   // Keep this intentionally simple to start. We can expand bands later.
   const sex = inferSexFromGender(gender);
   const ageYears = typeof age === "number" && Number.isFinite(age) ? age : null;
 
-  // Baseline energy: generic 2000 kcal unless we choose to special-case later.
   // Protein: keep a basic male/female adult split for now when possible.
   const isAdult = ageYears !== null ? ageYears >= 19 : true;
 
   const goals = {};
 
+  // --- Energy default derived from profile when possible (Mifflin–St Jeor, sedentary) ---
+  // If height/weight are missing, fall back to 2000 kcal.
+  function computeDefaultEnergyKcal({ sex, ageYears, heightCm, weightKg }) {
+    const h = typeof heightCm === "number" && Number.isFinite(heightCm) ? heightCm : null;
+    const w = typeof weightKg === "number" && Number.isFinite(weightKg) ? weightKg : null;
+    const a = typeof ageYears === "number" && Number.isFinite(ageYears) ? ageYears : null;
+
+    if (!h || !w || !a || !sex) return 2000;
+
+    // Mifflin–St Jeor BMR
+    const bmr = sex === "male"
+      ? (10 * w) + (6.25 * h) - (5 * a) + 5
+      : (10 * w) + (6.25 * h) - (5 * a) - 161;
+
+    // Sedentary activity factor (safe default; user can override later)
+    const tdee = bmr * 1.2;
+
+    // Clamp to sane bounds so weird profile data can't explode the UI
+    const clamped = Math.max(1200, Math.min(4500, tdee));
+
+    return Math.round(clamped);
+  }
+
+  const defaultEnergyKcal = computeDefaultEnergyKcal({
+    sex,
+    ageYears,
+    heightCm: typeof heightCm === "number" ? heightCm : null,
+    weightKg: typeof weightKg === "number" ? weightKg : null,
+  });
+
+  goals.energy_kcal = { value: defaultEnergyKcal, unit: "kcal" };
+  goals.energy_kj = { value: Math.round(defaultEnergyKcal * 4.184), unit: "kJ" };
+
+  // Hydration baseline (canonical totals key)
+  goals.water_total_ml = { value: 2000, unit: "ml" };
+
+  // Macros: derive from energy_kcal by default (user overrides can replace these via stored dailyGoals)
   // --- Macro defaults derived from energy (AMDR-style) ---
   // We compute "recommended" macro grams from a percentage of total calories.
   // Using midpoints of AMDR ranges for adults:
@@ -1265,13 +1301,6 @@ function buildDefaultDailyGoalsFromProfile({ age, gender }) {
     return { carbsG, fatG, proteinG };
   }
 
-  goals.energy_kcal = { value: 2000, unit: "kcal" };
-  goals.energy_kj = { value: 8400, unit: "kJ" };
-
-  // Hydration baseline (canonical totals key)
-  goals.water_total_ml = { value: 2000, unit: "ml" };
-
-  // Macros: derive from energy_kcal by default (user overrides can replace these via stored dailyGoals)
   const { carbsG, fatG, proteinG } = computeMacroGramsFromEnergyKcal(goals.energy_kcal.value);
 
   goals.protein_g = { value: proteinG, unit: "g" };
@@ -1333,7 +1362,7 @@ export async function getUserDailyGoals(db, userId) {
   }
 
   const usersCollection = db.collection("users");
-  const user = await usersCollection.findOne(userQuery, { projection: { dailyGoals: 1, age: 1, gender: 1 } });
+  const user = await usersCollection.findOne(userQuery, { projection: { dailyGoals: 1, age: 1, gender: 1, heightCm: 1, weightKg: 1 } });
 
   if (!user) {
     const err = new Error("User not found");
@@ -1341,7 +1370,7 @@ export async function getUserDailyGoals(db, userId) {
     throw err;
   }
 
-  const defaults = buildDefaultDailyGoalsFromProfile({ age: user.age, gender: user.gender });
+  const defaults = buildDefaultDailyGoalsFromProfile({ age: user.age, gender: user.gender, heightCm: user.heightCm, weightKg: user.weightKg });
   const effective = mergeDailyGoals(defaults, user.dailyGoals);
 
   return {
@@ -1370,7 +1399,7 @@ export async function seedUserDailyGoals(db, userId, options = {}) {
   const usersCollection = db.collection("users");
 
   const user = await usersCollection.findOne(userQuery, {
-    projection: { dailyGoals: 1, age: 1, gender: 1 },
+    projection: { dailyGoals: 1, age: 1, gender: 1, heightCm: 1, weightKg: 1 },
   });
 
   if (!user) {
@@ -1380,7 +1409,7 @@ export async function seedUserDailyGoals(db, userId, options = {}) {
   }
 
   if (!force && user.dailyGoals && user.dailyGoals.goals) {
-    const defaults = buildDefaultDailyGoalsFromProfile({ age: user.age, gender: user.gender });
+    const defaults = buildDefaultDailyGoalsFromProfile({ age: user.age, gender: user.gender, heightCm: user.heightCm, weightKg: user.weightKg });
     const effective = mergeDailyGoals(defaults, user.dailyGoals);
 
     return {
@@ -1414,7 +1443,7 @@ export async function seedUserDailyGoals(db, userId, options = {}) {
     { returnDocument: "after", returnOriginal: false }
   );
 
-  const defaults = buildDefaultDailyGoalsFromProfile({ age: user.age, gender: user.gender });
+  const defaults = buildDefaultDailyGoalsFromProfile({ age: user.age, gender: user.gender, heightCm: user.heightCm, weightKg: user.weightKg });
   const effective = mergeDailyGoals(defaults, result?.value?.dailyGoals ?? dailyGoals);
 
   return {
@@ -1446,7 +1475,7 @@ export async function patchUserDailyGoals(db, userId, patch) {
   // Confirm user exists (ObjectId match)
   const existing = await usersCol.findOne(
     { _id: userObjectId },
-    { projection: { _id: 1, age: 1, gender: 1, dailyGoals: 1 } }
+    { projection: { _id: 1, age: 1, gender: 1, heightCm: 1, weightKg: 1, dailyGoals: 1 } }
   );
 
   if (!existing?._id) {
