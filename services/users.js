@@ -1293,7 +1293,12 @@ function buildDefaultDailyGoalsFromProfile({ age, gender, heightCm, weightKg }) 
   goals.energy_kj = { value: Math.round(defaultEnergyKcal * 4.184), unit: "kJ" };
 
   // Hydration baseline (canonical totals key)
-  goals.water_total_ml = { value: 2000, unit: "ml" };
+  // Use simple sex-based Adequate Intake defaults for total water (all sources):
+  //  - Adult men: 3.7 L/day
+  //  - Adult women: 2.7 L/day
+  // Keep conservative fallback when sex is unknown.
+ // const defaultWaterTotalMl = sex === "male" ? 3700 : (sex === "female" ? 2700 : 2000);
+  //goals.water_total_ml = { value: defaultWaterTotalMl, unit: "ml" };
 
   // Macros: derive from energy_kcal by default (user overrides can replace these via stored dailyGoals)
   // --- Macro defaults derived from energy (AMDR-style) ---
@@ -1309,20 +1314,20 @@ function buildDefaultDailyGoalsFromProfile({ age, gender, heightCm, weightKg }) 
   goals.carbs_g = { value: carbsG, unit: "g" };
   goals.fat_g = { value: fatG, unit: "g" };
 
-  goals.fiber_g = { value: 28, unit: "g" };
-  goals.sugars_g = { value: 50, unit: "g" };
-  goals.sat_fat_g = { value: 22, unit: "g" };
-  goals.trans_fat_g = { value: 0, unit: "g" };
+  //goals.fiber_g = { value: 28, unit: "g" };
+  //goals.sugars_g = { value: 50, unit: "g" };
+  //goals.sat_fat_g = { value: 22, unit: "g" };
+  //goals.trans_fat_g = { value: 0, unit: "g" };
 
   // Common minerals/vitamins that are high-signal for your roundup
-  goals.sodium_mg = { value: 2300, unit: "mg" };
-  goals.potassium_mg = { value: 3400, unit: "mg" };
-  goals.calcium_mg = { value: 1000, unit: "mg" };
-  goals.magnesium_mg = { value: 400, unit: "mg" };
-  goals.iron_mg = { value: sex === "female" ? 18 : 8, unit: "mg" };
-  goals.zinc_mg = { value: sex === "female" ? 8 : 11, unit: "mg" };
-  goals.vitamin_d_ug = { value: 15, unit: "µg" };
-  goals.vitamin_c_mg = { value: sex === "female" ? 75 : 90, unit: "mg" };
+  //goals.sodium_mg = { value: 2300, unit: "mg" };
+  //goals.potassium_mg = { value: 3400, unit: "mg" };
+  //goals.calcium_mg = { value: 1000, unit: "mg" };
+  //goals.magnesium_mg = { value: 400, unit: "mg" };
+  //goals.iron_mg = { value: sex === "female" ? 18 : 8, unit: "mg" };
+  //goals.zinc_mg = { value: sex === "female" ? 8 : 11, unit: "mg" };
+  //goals.vitamin_d_ug = { value: 15, unit: "µg" };
+  //goals.vitamin_c_mg = { value: sex === "female" ? 75 : 90, unit: "mg" };
 
   return {
     version: DAILY_GOALS_VERSION,
