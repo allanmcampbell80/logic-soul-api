@@ -1431,6 +1431,10 @@ export async function seedUserDailyGoals(db, userId, options = {}) {
     profileKey: DAILY_GOALS_PROFILE_KEY,
     source: "default",
     updatedAt: now,
+    // Track which goal keys the user explicitly overrides so we can
+    // keep deriving the *other* values from energy (e.g., override protein
+    // without freezing carbs/fat).
+    overrides: {},
     goals: {},
   };
 
@@ -1502,6 +1506,12 @@ export async function patchUserDailyGoals(db, userId, patch) {
     // Validate + coerce to finite number (uses your existing helpers)
     const n = validateDailyGoalUpdate(key, v);
 
+    // Mark explicit user overrides for macro keys so energy changes can still
+    // auto-derive any macros the user did NOT override.
+    if (key === "protein_g" || key === "carbs_g" || key === "fat_g") {
+      setOps[`dailyGoals.overrides.${key}`] = true;
+    }
+
     // Preserve unit if it already exists; otherwise infer from key
     const existingUnit = existing?.dailyGoals?.goals?.[key]?.unit ?? null;
     const unit = existingUnit || defaultUnitForKey(key);
@@ -1510,12 +1520,11 @@ export async function patchUserDailyGoals(db, userId, patch) {
     if (unit) setOps[`dailyGoals.goals.${key}.unit`] = unit;
   }
 
-  // If user updated energy but did NOT explicitly set macros, keep macros in sync with energy
-  // for legacy users where macros were stored as default values.
+  // If energy changes, keep macros derived from energy UNLESS the user explicitly overrides
+  // a specific macro. This lets users tweak protein without freezing carbs/fat (and vice versa).
   const energyWasPatched = patchedKeys.has("energy_kcal") || patchedKeys.has("energy_kj");
-  const macrosWerePatched = patchedKeys.has("protein_g") || patchedKeys.has("carbs_g") || patchedKeys.has("fat_g");
 
-  if (energyWasPatched && !macrosWerePatched) {
+  if (energyWasPatched) {
     // Determine the new kcal value to base macros on
     let newKcal = null;
     if (patchedKeys.has("energy_kcal")) {
@@ -1528,22 +1537,28 @@ export async function patchUserDailyGoals(db, userId, patch) {
     if (typeof newKcal === "number" && Number.isFinite(newKcal) && newKcal > 0) {
       const { carbsG, fatG, proteinG } = computeMacroGramsFromEnergyKcal(newKcal);
 
-      const storedSource = existing?.dailyGoals?.source ?? null;
-      const hasStoredProtein = existing?.dailyGoals?.goals?.protein_g?.value != null;
-      const hasStoredCarbs = existing?.dailyGoals?.goals?.carbs_g?.value != null;
-      const hasStoredFat = existing?.dailyGoals?.goals?.fat_g?.value != null;
+      // Existing override flags (if any)
+      const overrides = (existing?.dailyGoals?.overrides && typeof existing.dailyGoals.overrides === "object")
+        ? existing.dailyGoals.overrides
+        : {};
 
-      // Only auto-update macros when they look like legacy defaults (storedSource === "default").
-      // If the user previously customized macros (source becomes "user"), we respect their override.
-      if (storedSource === "default" || (!storedSource && (hasStoredProtein || hasStoredCarbs || hasStoredFat))) {
-        const unitG = "g";
+      // Helper: true if the user explicitly overrides this macro either previously or in this patch
+      const isOverridden = (k) => overrides?.[k] === true || patchedKeys.has(k);
 
+      const unitG = "g";
+
+      // Only update the macros that are NOT overridden
+      if (!isOverridden("protein_g")) {
         setOps[`dailyGoals.goals.protein_g.value`] = proteinG;
         setOps[`dailyGoals.goals.protein_g.unit`] = existing?.dailyGoals?.goals?.protein_g?.unit ?? unitG;
+      }
 
+      if (!isOverridden("carbs_g")) {
         setOps[`dailyGoals.goals.carbs_g.value`] = carbsG;
         setOps[`dailyGoals.goals.carbs_g.unit`] = existing?.dailyGoals?.goals?.carbs_g?.unit ?? unitG;
+      }
 
+      if (!isOverridden("fat_g")) {
         setOps[`dailyGoals.goals.fat_g.value`] = fatG;
         setOps[`dailyGoals.goals.fat_g.unit`] = existing?.dailyGoals?.goals?.fat_g?.unit ?? unitG;
       }
@@ -1561,8 +1576,7 @@ export async function patchUserDailyGoals(db, userId, patch) {
   // Preserve legacy "default" source unless the user explicitly patched something non-energy.
   // If they changed energy only, we still treat it as a user override, but we don’t want to
   // incorrectly preserve stale legacy macro defaults.
-  const existingSource = existing?.dailyGoals?.source ?? null;
-  setOps["dailyGoals.source"] = existingSource === "default" ? "user" : "user";
+  setOps["dailyGoals.source"] = "user";
 
   // IMPORTANT: Never $set the whole dailyGoals object here.
   await usersCol.updateOne({ _id: userObjectId }, { $set: setOps });
