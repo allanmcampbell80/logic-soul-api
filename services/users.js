@@ -13,6 +13,7 @@ function mapUserDoc(user) {
     createdAt: user.createdAt,
     lastSeenAt: user.lastSeenAt,
     displayName: user.displayName ?? null,
+    avatarName: user.avatarName ?? null,
     gender: user.gender ?? null,
     age: user.age ?? null,
     heightCm: user.heightCm ?? null,
@@ -229,6 +230,7 @@ export async function updateUserProfile(db, userId, profile) {
   const updateDoc = {
     $set: {
       displayName: profile.displayName ?? null,
+      avatarName: profile.avatarName ?? null,
       gender: profile.gender ?? null,
       age: typeof profile.age === "number" ? profile.age : null,
       heightCm: typeof profile.heightCm === "number" ? profile.heightCm : null,
