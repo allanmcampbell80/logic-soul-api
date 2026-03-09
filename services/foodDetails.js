@@ -20,6 +20,73 @@ function pickFirstNumber(obj, keys) {
   return null;
 }
 
+function canonicalFoodDetailsNutrientKey(key) {
+  const k = String(key || "").trim().toLowerCase();
+  switch (k) {
+    case "biotin":
+    case "vitamin_b7":
+      return "vitamin_b7_ug";
+    case "iodine_i":
+    case "iodine":
+      return "iodine_ug";
+    case "chromium":
+    case "chromium_cr":
+      return "chromium_ug";
+    case "retinol":
+      return "retinol_ug";
+    case "carotene_alpha":
+      return "carotene_alpha_ug";
+    case "carotene_beta":
+      return "carotene_beta_ug";
+    case "cryptoxanthin_beta":
+      return "cryptoxanthin_beta_ug";
+    case "lycopene":
+      return "lycopene_ug";
+    case "lutein_zeaxanthin":
+      return "lutein_zeaxanthin_ug";
+    case "lutein":
+      return "lutein_ug";
+    case "zeaxanthin":
+      return "zeaxanthin_ug";
+    case "molybdenum_mo":
+    case "molybdenum":
+      return "molybdenum_ug";
+    default:
+      return key;
+  }
+}
+
+function canonicalFoodDetailsDisplayName(key, fallback) {
+  switch (String(key || "")) {
+    case "vitamin_b7_ug":
+      return "Biotin";
+    case "iodine_ug":
+      return "Iodine, I";
+    case "chromium_ug":
+      return "Chromium, Cr";
+    case "retinol_ug":
+      return "Retinol";
+    case "carotene_alpha_ug":
+      return "Carotene, alpha";
+    case "carotene_beta_ug":
+      return "Carotene, beta";
+    case "cryptoxanthin_beta_ug":
+      return "Cryptoxanthin, beta";
+    case "lycopene_ug":
+      return "Lycopene";
+    case "lutein_zeaxanthin_ug":
+      return "Lutein + zeaxanthin";
+    case "lutein_ug":
+      return "Lutein";
+    case "zeaxanthin_ug":
+      return "Zeaxanthin";
+    case "molybdenum_ug":
+      return "Molybdenum, Mo";
+    default:
+      return fallback || null;
+  }
+}
+
 function buildOffNutrientsArray(off) {
   if (!off || typeof off !== "object") return [];
 
@@ -499,16 +566,19 @@ export async function getFoodDetails(db, ids) {
     const normalizedNutrientsArray = normalizeNutrientsForClient(nutrientsArray, servingCtx);
 
     // Shape for Swift.
-    const nutrients = normalizedNutrientsArray.map((n) => ({
-      key: n.key || null,
-      label: n.display_name || null,
-      unit: n.unit || null,
-      per100g: typeof n.per_100g === "number" ? n.per_100g : null,
-      perServing: typeof n.per_serving === "number" ? n.per_serving : null,
-      source: n.source || null,
-      dataQuality: n.data_quality || null,
-      confidence: typeof n.confidence === "number" ? n.confidence : null,
-    }));
+    const nutrients = normalizedNutrientsArray.map((n) => {
+      const canonicalKey = canonicalFoodDetailsNutrientKey(n.key || null);
+      return {
+        key: canonicalKey || null,
+        label: canonicalFoodDetailsDisplayName(canonicalKey, n.display_name || null),
+        unit: n.unit || null,
+        per100g: typeof n.per_100g === "number" ? n.per_100g : null,
+        perServing: typeof n.per_serving === "number" ? n.per_serving : null,
+        source: n.source || null,
+        dataQuality: n.data_quality || null,
+        confidence: typeof n.confidence === "number" ? n.confidence : null,
+      };
+    });
 
     return {
       id: String(doc._id),
