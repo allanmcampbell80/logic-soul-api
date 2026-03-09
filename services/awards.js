@@ -45,6 +45,15 @@ const AWARD_RULES = {
         icon: "meal10",
       },
     },
+    {
+      threshold: 100,
+      award: {
+        key: "onehundred_meals_logged",
+        title: "100 Meals Logged",
+        subtitle: "You're building the kind of data that leads to real discoveries.",
+        icon: "meal100",
+      },
+    },
   ],
 
   barcodesAdded: [
@@ -53,7 +62,7 @@ const AWARD_RULES = {
       award: {
         key: "first_barcode_added",
         title: "First Barcode Added",
-        subtitle: "You just started building your database.",
+        subtitle: "You're helping make LogicSoul even more precise.",
         icon: "barcode1",
       },
     },
@@ -66,6 +75,15 @@ const AWARD_RULES = {
         icon: "barcode25",
       },
     },
+    {
+      threshold: 100,
+      award: {
+        key: "onehundred_barcodes_added",
+        title: "100 Barcodes Added",
+        subtitle: "You're uncovering foods that make LogicSoul smarter.",
+        icon: "barcode100",
+      },
+    },
   ],
 
   dailyCheckins: [
@@ -73,7 +91,7 @@ const AWARD_RULES = {
       threshold: 1,
       award: {
         key: "first_checkin",
-        title: "First Check‑In",
+        title: "First Check-In",
         subtitle: "Thanks for checking in today.",
         icon: "checkin1",
       },
@@ -82,8 +100,8 @@ const AWARD_RULES = {
       threshold: 7,
       award: {
         key: "seven_checkins",
-        title: "7 Check‑Ins",
-        subtitle: "A full week of check‑ins.",
+        title: "7 Check-Ins",
+        subtitle: "A full week of check-ins.",
         icon: "checkin7",
       },
     },
@@ -91,9 +109,18 @@ const AWARD_RULES = {
       threshold: 30,
       award: {
         key: "thirty_checkins",
-        title: "30 Check‑Ins",
+        title: "30 Check-Ins",
         subtitle: "A solid habit is forming.",
         icon: "checkin30",
+      },
+    },
+    {
+      threshold: 100,
+      award: {
+        key: "onehundred_checkins",
+        title: "100 Check-Ins",
+        subtitle: "You've created a rich foundation for real insight.",
+        icon: "checkin100",
       },
     },
   ],
