@@ -1404,7 +1404,13 @@ function buildEffectiveTargetBandsFromProfile({ age, gender, heightCm, weightKg 
 }
 
 function buildDefaultDailyGoalsFromProfile({ age, gender, heightCm, weightKg }) {
-  const effectiveTargetBands = buildEffectiveTargetBandsFromProfile({ age, gender, heightCm, weightKg });
+const effectiveTargetBands = buildEffectiveTargetBandsFromProfile({
+  age,
+  gender,
+  heightCm,
+  weightKg,
+});
+
   const goals = {};
 
   for (const [key, band] of Object.entries(effectiveTargetBands.goals || {})) {
@@ -1416,111 +1422,6 @@ function buildDefaultDailyGoalsFromProfile({ age, gender, heightCm, weightKg }) 
       unit: band.unit ?? defaultUnitForKey(key),
     };
   }
-
-  return {
-    version: DAILY_GOALS_VERSION,
-    profileKey: DAILY_GOALS_PROFILE_KEY,
-    source: "default",
-    updatedAt: new Date(),
-    goals,
-  };
-}
-
-// Derive macro gram targets from daily energy using AMDR-style midpoints.
-// Carbs: 45–65% -> 55%, Fat: 20–35% -> 27.5%, Protein: 10–35% -> 17.5%
-function computeMacroGramsFromEnergyKcal(energyKcal) {
-  const kcal = typeof energyKcal === "number" && Number.isFinite(energyKcal) && energyKcal > 0 ? energyKcal : 2000;
-
-  const pctCarbs = 0.55;
-  const pctFat = 0.275;
-  const pctProtein = 0.175;
-
-  const carbsG = Math.round(((kcal * pctCarbs) / 4) * 10) / 10;      // 4 kcal/g
-  const fatG = Math.round(((kcal * pctFat) / 9) * 10) / 10;          // 9 kcal/g
-  const proteinG = Math.round(((kcal * pctProtein) / 4) * 10) / 10;  // 4 kcal/g
-
-  return { carbsG, fatG, proteinG };
-}
-
-function buildDefaultDailyGoalsFromProfile({ age, gender, heightCm, weightKg }) {
-  // Keep this intentionally simple to start. We can expand bands later.
-  const sex = inferSexFromGender(gender);
-  const ageYears = typeof age === "number" && Number.isFinite(age) ? age : null;
-
-  // Protein: keep a basic male/female adult split for now when possible.
-  const isAdult = ageYears !== null ? ageYears >= 19 : true;
-
-  const goals = {};
-
-  // --- Energy default derived from profile when possible (Mifflin–St Jeor, sedentary) ---
-  // If height/weight are missing, fall back to 2000 kcal.
-  function computeDefaultEnergyKcal({ sex, ageYears, heightCm, weightKg }) {
-    const h = typeof heightCm === "number" && Number.isFinite(heightCm) ? heightCm : null;
-    const w = typeof weightKg === "number" && Number.isFinite(weightKg) ? weightKg : null;
-    const a = typeof ageYears === "number" && Number.isFinite(ageYears) ? ageYears : null;
-
-    if (!h || !w || !a || !sex) return 2000;
-
-    // Mifflin–St Jeor BMR
-    const bmr = sex === "male"
-      ? (10 * w) + (6.25 * h) - (5 * a) + 5
-      : (10 * w) + (6.25 * h) - (5 * a) - 161;
-
-    // Sedentary activity factor (safe default; user can override later)
-    const tdee = bmr * 1.2;
-
-    // Clamp to sane bounds so weird profile data can't explode the UI
-    const clamped = Math.max(1200, Math.min(4500, tdee));
-
-    return Math.round(clamped);
-  }
-
-  const defaultEnergyKcal = computeDefaultEnergyKcal({
-    sex,
-    ageYears,
-    heightCm: typeof heightCm === "number" ? heightCm : null,
-    weightKg: typeof weightKg === "number" ? weightKg : null,
-  });
-
-  goals.energy_kcal = { value: defaultEnergyKcal, unit: "kcal" };
-  goals.energy_kj = { value: Math.round(defaultEnergyKcal * 4.184), unit: "kJ" };
-
-  // Hydration baseline (canonical totals key)
-  // Use simple sex-based Adequate Intake defaults for total water (all sources):
-  //  - Adult men: 3.7 L/day
-  //  - Adult women: 2.7 L/day
-  // Keep conservative fallback when sex is unknown.
- // const defaultWaterTotalMl = sex === "male" ? 3700 : (sex === "female" ? 2700 : 2000);
-  //goals.water_total_ml = { value: defaultWaterTotalMl, unit: "ml" };
-
-  // Macros: derive from energy_kcal by default (user overrides can replace these via stored dailyGoals)
-  // --- Macro defaults derived from energy (AMDR-style) ---
-  // We compute "recommended" macro grams from a percentage of total calories.
-  // Using midpoints of AMDR ranges for adults:
-  //  - Carbs: 45–65%  -> midpoint 55%
-  //  - Fat:   20–35%  -> midpoint 27.5%
-  //  - Protein:10–35% -> midpoint 17.5%
-  // These sum to 100% (55 + 27.5 + 17.5).
-  const { carbsG, fatG, proteinG } = computeMacroGramsFromEnergyKcal(goals.energy_kcal.value);
-
-  goals.protein_g = { value: proteinG, unit: "g" };
-  goals.carbs_g = { value: carbsG, unit: "g" };
-  goals.fat_g = { value: fatG, unit: "g" };
-
-  //goals.fiber_g = { value: 28, unit: "g" };
-  //goals.sugars_g = { value: 50, unit: "g" };
-  //goals.sat_fat_g = { value: 22, unit: "g" };
-  //goals.trans_fat_g = { value: 0, unit: "g" };
-
-  // Common minerals/vitamins that are high-signal for your roundup
-  //goals.sodium_mg = { value: 2300, unit: "mg" };
-  //goals.potassium_mg = { value: 3400, unit: "mg" };
-  //goals.calcium_mg = { value: 1000, unit: "mg" };
-  //goals.magnesium_mg = { value: 400, unit: "mg" };
-  //goals.iron_mg = { value: sex === "female" ? 18 : 8, unit: "mg" };
-  //goals.zinc_mg = { value: sex === "female" ? 8 : 11, unit: "mg" };
-  //goals.vitamin_d_ug = { value: 15, unit: "µg" };
-  //goals.vitamin_c_mg = { value: sex === "female" ? 75 : 90, unit: "mg" };
 
   return {
     version: DAILY_GOALS_VERSION,
@@ -1571,7 +1472,14 @@ export async function getUserDailyGoals(db, userId) {
   }
 
   const defaults = buildDefaultDailyGoalsFromProfile({ age: user.age, gender: user.gender, heightCm: user.heightCm, weightKg: user.weightKg });
-  const effectiveTargetBands = buildEffectiveTargetBandsFromProfile({ age, gender, heightCm, weightKg });
+
+  const effectiveTargetBands = buildEffectiveTargetBandsFromProfile({
+  age: user.age,
+  gender: user.gender,
+  heightCm: user.heightCm,
+  weightKg: user.weightKg
+});
+
   const effective = mergeDailyGoals(defaults, user.dailyGoals);
 
   return {
@@ -1611,18 +1519,31 @@ export async function seedUserDailyGoals(db, userId, options = {}) {
   }
 
   if (!force && user.dailyGoals && user.dailyGoals.goals) {
-    const defaults = buildDefaultDailyGoalsFromProfile({ age: user.age, gender: user.gender, heightCm: user.heightCm, weightKg: user.weightKg });
-    const effective = mergeDailyGoals(defaults, user.dailyGoals);
+  const defaults = buildDefaultDailyGoalsFromProfile({
+    age: user.age,
+    gender: user.gender,
+    heightCm: user.heightCm,
+    weightKg: user.weightKg,
+  });
 
-    return {
-      ok: true,
-      userId,
-      dailyGoals: savedDailyGoals,
-      effectiveDailyGoals: effective,
-      effectiveTargetBands,
-    seeded,
-  };
-  }
+  const effectiveTargetBands = buildEffectiveTargetBandsFromProfile({
+    age: user.age,
+    gender: user.gender,
+    heightCm: user.heightCm,
+    weightKg: user.weightKg,
+  });
+
+  const effective = mergeDailyGoals(defaults, user.dailyGoals);
+
+  return {
+  ok: true,
+  userId: cleanUserId,
+  dailyGoals: result?.value?.dailyGoals ?? dailyGoals,
+  effectiveDailyGoals: effective ?? mergeDailyGoals(defaults, result?.value?.dailyGoals ?? dailyGoals),
+  effectiveTargetBands,
+  seeded: true,
+};
+}
 
   // Overrides-only: store an empty goals map. Defaults are computed on demand.
   const now = new Date();
@@ -1780,6 +1701,10 @@ export async function patchUserDailyGoals(db, userId, patch) {
 
   // IMPORTANT: Never $set the whole dailyGoals object here.
   await usersCol.updateOne({ _id: userObjectId }, { $set: setOps });
+
+  // Return merged bundle consistent with GET/SEED
+  return await getUserDailyGoals(db, cleanUserId);
+}
 
   // Return merged bundle consistent with GET/SEED
   return await getUserDailyGoals(db, cleanUserId);
