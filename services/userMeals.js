@@ -192,6 +192,7 @@ const DAILY_PANEL_NUTRIENTS = {
   pantothenic_acid: { field: "vitamin_b5_mg", unit: "mg" },
   vitamin_b_6: { field: "vitamin_b6_mg", unit: "mg" },
   biotin: { field: "vitamin_b7_ug", unit: "µg" },
+  vitamin_b7: { field: "vitamin_b7_ug", unit: "µg" },
   folate_total: { field: "folate_total_ug", unit: "µg" },
   folate_dfe: { field: "folate_dfe_ug", unit: "µg" },
   folate_food: { field: "folate_food_ug", unit: "µg" },
@@ -243,6 +244,8 @@ const DAILY_PANEL_NUTRIENTS = {
   manganese_mn: { field: "manganese_mg", unit: "mg" },
 
   iodine: { field: "iodine_ug", unit: "µg" },
+  iodine_i: { field: "iodine_ug", unit: "µg" },
+  chromium: { field: "chromium_ug", unit: "µg" },
   chromium_cr: { field: "chromium_ug", unit: "µg" },
 
   // Other compounds
@@ -263,6 +266,8 @@ const DAILY_PANEL_NUTRIENTS = {
   cryptoxanthin_beta: { field: "cryptoxanthin_beta_ug", unit: "µg" },
   lycopene: { field: "lycopene_ug", unit: "µg" },
   lutein_zeaxanthin: { field: "lutein_zeaxanthin_ug", unit: "µg" },
+  lutein: { field: "lutein_ug", unit: "µg" },
+  zeaxanthin: { field: "zeaxanthin_ug", unit: "µg" },
 };
 
 export async function logUserMeal(userId, payload) {
@@ -1913,6 +1918,5 @@ export async function deleteUserMeal(db, userId, mealId) {
     dateKey: dateKey || null,
   };
 }
-
 
 
