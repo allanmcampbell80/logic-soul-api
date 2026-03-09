@@ -1519,31 +1519,31 @@ export async function seedUserDailyGoals(db, userId, options = {}) {
   }
 
   if (!force && user.dailyGoals && user.dailyGoals.goals) {
-  const defaults = buildDefaultDailyGoalsFromProfile({
-    age: user.age,
-    gender: user.gender,
-    heightCm: user.heightCm,
-    weightKg: user.weightKg,
-  });
+    const defaults = buildDefaultDailyGoalsFromProfile({
+      age: user.age,
+      gender: user.gender,
+      heightCm: user.heightCm,
+      weightKg: user.weightKg,
+    });
 
-  const effectiveTargetBands = buildEffectiveTargetBandsFromProfile({
-    age: user.age,
-    gender: user.gender,
-    heightCm: user.heightCm,
-    weightKg: user.weightKg,
-  });
+    const effectiveTargetBands = buildEffectiveTargetBandsFromProfile({
+      age: user.age,
+      gender: user.gender,
+      heightCm: user.heightCm,
+      weightKg: user.weightKg,
+    });
 
-  const effective = mergeDailyGoals(defaults, user.dailyGoals);
+    const effective = mergeDailyGoals(defaults, user.dailyGoals);
 
-  return {
-  ok: true,
-  userId: cleanUserId,
-  dailyGoals: result?.value?.dailyGoals ?? dailyGoals,
-  effectiveDailyGoals: effective ?? mergeDailyGoals(defaults, result?.value?.dailyGoals ?? dailyGoals),
-  effectiveTargetBands,
-  seeded: true,
-};
-}
+    return {
+      ok: true,
+      userId: cleanUserId,
+      dailyGoals: user.dailyGoals,
+      effectiveDailyGoals: effective,
+      effectiveTargetBands,
+      seeded: false,
+    };
+  }
 
   // Overrides-only: store an empty goals map. Defaults are computed on demand.
   const now = new Date();
@@ -1570,14 +1570,26 @@ export async function seedUserDailyGoals(db, userId, options = {}) {
     { returnDocument: "after", returnOriginal: false }
   );
 
-  const defaults = buildDefaultDailyGoalsFromProfile({ age: user.age, gender: user.gender, heightCm: user.heightCm, weightKg: user.weightKg });
+  const defaults = buildDefaultDailyGoalsFromProfile({
+    age: user.age,
+    gender: user.gender,
+    heightCm: user.heightCm,
+    weightKg: user.weightKg,
+  });
+  const effectiveTargetBands = buildEffectiveTargetBandsFromProfile({
+    age: user.age,
+    gender: user.gender,
+    heightCm: user.heightCm,
+    weightKg: user.weightKg,
+  });
   const effective = mergeDailyGoals(defaults, result?.value?.dailyGoals ?? dailyGoals);
 
   return {
     ok: true,
     userId: cleanUserId,
     dailyGoals: result?.value?.dailyGoals ?? dailyGoals,
-    effectiveDailyGoals: effective ?? mergeDailyGoals(defaults, result?.value?.dailyGoals ?? dailyGoals),
+    effectiveDailyGoals: effective,
+    effectiveTargetBands,
     seeded: true,
   };
 }
@@ -1701,10 +1713,6 @@ export async function patchUserDailyGoals(db, userId, patch) {
 
   // IMPORTANT: Never $set the whole dailyGoals object here.
   await usersCol.updateOne({ _id: userObjectId }, { $set: setOps });
-
-  // Return merged bundle consistent with GET/SEED
-  return await getUserDailyGoals(db, cleanUserId);
-}
 
   // Return merged bundle consistent with GET/SEED
   return await getUserDailyGoals(db, cleanUserId);
