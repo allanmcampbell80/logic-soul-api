@@ -1,6 +1,7 @@
 // services/users.js
 import { ObjectId } from "mongodb";
 import crypto from "crypto";
+import * as driV1Module from "./dri/datasets/dri_v1.js";
 
 function mapUserDoc(user) {
   if (!user) return null;
@@ -1235,6 +1236,196 @@ function defaultUnitForKey(key) {
   return null;
 }
 
+function resolveDriBandsArray(moduleNs) {
+  if (Array.isArray(moduleNs?.bands)) return moduleNs.bands;
+  if (Array.isArray(moduleNs?.DRI_V1_BANDS)) return moduleNs.DRI_V1_BANDS;
+  if (Array.isArray(moduleNs?.default?.bands)) return moduleNs.default.bands;
+  if (Array.isArray(moduleNs?.default)) return moduleNs.default;
+
+  for (const value of Object.values(moduleNs || {})) {
+    if (Array.isArray(value)) return value;
+    if (value && Array.isArray(value.bands)) return value.bands;
+  }
+
+  return [];
+}
+
+const DRI_V1_BANDS = resolveDriBandsArray(driV1Module);
+
+function computeMacroGramsFromEnergyKcal(energyKcal) {
+  const kcal = typeof energyKcal === "number" && Number.isFinite(energyKcal) && energyKcal > 0 ? energyKcal : 2000;
+
+  const pctCarbs = 0.55;
+  const pctFat = 0.275;
+  const pctProtein = 0.175;
+
+  const carbsG = Math.round(((kcal * pctCarbs) / 4) * 10) / 10;
+  const fatG = Math.round(((kcal * pctFat) / 9) * 10) / 10;
+  const proteinG = Math.round(((kcal * pctProtein) / 4) * 10) / 10;
+
+  return { carbsG, fatG, proteinG };
+}
+
+function computeDefaultEnergyKcal({ sex, ageYears, heightCm, weightKg }) {
+  const h = typeof heightCm === "number" && Number.isFinite(heightCm) ? heightCm : null;
+  const w = typeof weightKg === "number" && Number.isFinite(weightKg) ? weightKg : null;
+  const a = typeof ageYears === "number" && Number.isFinite(ageYears) ? ageYears : null;
+
+  if (!h || !w || !a || !sex) return 2000;
+
+  const bmr = sex === "male"
+    ? (10 * w) + (6.25 * h) - (5 * a) + 5
+    : (10 * w) + (6.25 * h) - (5 * a) - 161;
+
+  const tdee = bmr * 1.2;
+  const clamped = Math.max(1200, Math.min(4500, tdee));
+  return Math.round(clamped);
+}
+
+function ageMatchesBand(band, ageYears) {
+  const age = typeof ageYears === "number" && Number.isFinite(ageYears) ? ageYears : 35;
+  const minOk = age >= (band?.minYears ?? 0);
+  const maxOk = band?.maxYears == null ? true : age <= band.maxYears;
+  return minOk && maxOk;
+}
+
+function selectBestDRIBandForProfile(nutrientKey, { ageYears, sex }) {
+  const candidates = DRI_V1_BANDS.filter(
+    (band) => band?.nutrientKey === nutrientKey && ageMatchesBand(band, ageYears)
+  );
+  if (!candidates.length) return null;
+
+  if (sex) {
+    const exact = candidates.find(
+      (band) => String(band?.sex || "").trim().toLowerCase() === sex
+    );
+    if (exact) return exact;
+  }
+
+  const unisex = candidates.find((band) => band?.sex == null);
+  return unisex || candidates[0] || null;
+}
+
+function resolveBandValue(band) {
+  if (!band || typeof band !== "object") return null;
+  return band.recommended
+    ?? band.upperSafe
+    ?? band.upperLimit
+    ?? band.lowerSafe
+    ?? null;
+}
+
+function buildEffectiveTargetBandsFromProfile({ age, gender, heightCm, weightKg }) {
+  const sex = inferSexFromGender(gender);
+  const ageYears = typeof age === "number" && Number.isFinite(age) ? age : null;
+
+  const goals = {};
+
+  for (const band of DRI_V1_BANDS) {
+    const nutrientKey = band?.nutrientKey;
+    if (!nutrientKey || goals[nutrientKey]) continue;
+
+    const resolved = selectBestDRIBandForProfile(nutrientKey, { ageYears, sex });
+    if (!resolved) continue;
+
+    const hasUsableTarget =
+      Number.isFinite(resolved.recommended) ||
+      Number.isFinite(resolved.lowerSafe) ||
+      Number.isFinite(resolved.upperSafe) ||
+      Number.isFinite(resolved.upperLimit);
+
+    if (!hasUsableTarget) continue;
+
+    goals[nutrientKey] = {
+      recommended: Number.isFinite(resolved.recommended) ? resolved.recommended : null,
+      lowerSafe: Number.isFinite(resolved.lowerSafe) ? resolved.lowerSafe : null,
+      upperSafe: Number.isFinite(resolved.upperSafe) ? resolved.upperSafe : null,
+      upperLimit: Number.isFinite(resolved.upperLimit) ? resolved.upperLimit : null,
+      unit: resolved.unit ?? defaultUnitForKey(nutrientKey),
+    };
+  }
+
+  const defaultEnergyKcal = computeDefaultEnergyKcal({
+    sex,
+    ageYears,
+    heightCm: typeof heightCm === "number" ? heightCm : null,
+    weightKg: typeof weightKg === "number" ? weightKg : null,
+  });
+
+  goals.energy_kcal = {
+    recommended: defaultEnergyKcal,
+    lowerSafe: null,
+    upperSafe: null,
+    upperLimit: null,
+    unit: "kcal",
+  };
+
+  goals.energy_kj = {
+    recommended: Math.round(defaultEnergyKcal * 4.184),
+    lowerSafe: null,
+    upperSafe: null,
+    upperLimit: null,
+    unit: "kJ",
+  };
+
+  const { carbsG, fatG, proteinG } = computeMacroGramsFromEnergyKcal(defaultEnergyKcal);
+
+  goals.protein_g = {
+    recommended: proteinG,
+    lowerSafe: null,
+    upperSafe: null,
+    upperLimit: null,
+    unit: "g",
+  };
+
+  goals.carbs_g = {
+    recommended: carbsG,
+    lowerSafe: null,
+    upperSafe: null,
+    upperLimit: null,
+    unit: "g",
+  };
+
+  goals.fat_g = {
+    recommended: fatG,
+    lowerSafe: null,
+    upperSafe: null,
+    upperLimit: null,
+    unit: "g",
+  };
+
+  return {
+    version: DAILY_GOALS_VERSION,
+    profileKey: DAILY_GOALS_PROFILE_KEY,
+    source: "resolved",
+    updatedAt: new Date(),
+    goals,
+  };
+}
+
+function buildDefaultDailyGoalsFromProfile({ age, gender, heightCm, weightKg }) {
+  const effectiveTargetBands = buildEffectiveTargetBandsFromProfile({ age, gender, heightCm, weightKg });
+  const goals = {};
+
+  for (const [key, band] of Object.entries(effectiveTargetBands.goals || {})) {
+    const value = resolveBandValue(band);
+    if (!Number.isFinite(value)) continue;
+
+    goals[key] = {
+      value,
+      unit: band.unit ?? defaultUnitForKey(key),
+    };
+  }
+
+  return {
+    version: DAILY_GOALS_VERSION,
+    profileKey: DAILY_GOALS_PROFILE_KEY,
+    source: "default",
+    updatedAt: new Date(),
+    goals,
+  };
+}
+
 // Derive macro gram targets from daily energy using AMDR-style midpoints.
 // Carbs: 45–65% -> 55%, Fat: 20–35% -> 27.5%, Protein: 10–35% -> 17.5%
 function computeMacroGramsFromEnergyKcal(energyKcal) {
@@ -1380,6 +1571,7 @@ export async function getUserDailyGoals(db, userId) {
   }
 
   const defaults = buildDefaultDailyGoalsFromProfile({ age: user.age, gender: user.gender, heightCm: user.heightCm, weightKg: user.weightKg });
+  const effectiveTargetBands = buildEffectiveTargetBandsFromProfile({ age, gender, heightCm, weightKg });
   const effective = mergeDailyGoals(defaults, user.dailyGoals);
 
   return {
@@ -1389,6 +1581,7 @@ export async function getUserDailyGoals(db, userId) {
     dailyGoals: user.dailyGoals ?? null,
     // What clients + analysis should use (defaults merged with overrides)
     effectiveDailyGoals: effective,
+    effectiveTargetBands,
   };
 }
 
@@ -1423,12 +1616,12 @@ export async function seedUserDailyGoals(db, userId, options = {}) {
 
     return {
       ok: true,
-      userId: cleanUserId,
-      dailyGoals: user.dailyGoals,
+      userId,
+      dailyGoals: savedDailyGoals,
       effectiveDailyGoals: effective,
-      seeded: false,
-      reason: "already_exists",
-    };
+      effectiveTargetBands,
+    seeded,
+  };
   }
 
   // Overrides-only: store an empty goals map. Defaults are computed on demand.
