@@ -433,9 +433,22 @@ export const driV1Bands = [
   // Additional PUFA subtypes (informational)
   { nutrientKey: "pufa_18_4_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for this PUFA subtype (informational tracking)" },
   { nutrientKey: "pufa_20_4_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for this PUFA subtype (informational tracking)" },
-  { nutrientKey: "epa_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for EPA (informational tracking)" },
-  { nutrientKey: "dha_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for DHA (informational tracking)" },
-  { nutrientKey: "dpa_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for DPA (informational tracking)" },
+  {
+    nutrientKey: "omega3_marine_g",
+    sex: null,
+    minYears: 19,
+    maxYears: null,
+    referenceType: "heuristic_ai",
+    recommended: 0.5,
+    lowerSafe: 0.25,
+    upperSafe: 2,
+    upperLimit: null,
+    unit: "g",
+    source: "Heuristic marine omega-3 target based on common EPA+DHA guidance (~250–500 mg/day minimum, 500 mg/day preferred for general health)",
+  },
+  { nutrientKey: "epa_g", sex: null, minYears: 19, maxYears: null, referenceType: "informational", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "Tracked informationally; marine omega-3 target is applied via combined EPA+DHA" },
+  { nutrientKey: "dha_g", sex: null, minYears: 19, maxYears: null, referenceType: "informational", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "Tracked informationally; marine omega-3 target is applied via combined EPA+DHA" },
+  { nutrientKey: "dpa_g", sex: null, minYears: 19, maxYears: null, referenceType: "informational", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "Tracked informationally as a marine omega-3 component; no standalone DRI established" },
 
   // Sugars + sugar alcohols
   {
