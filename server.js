@@ -1162,6 +1162,60 @@ app.delete("/users/:id/meals/:mealId", async (req, res) => {
   }
 });
 
+//-------------------------------------------------------------------------------------------------------------------------------
+
+// GET /sample-daily-totals
+// Returns a reusable sample daily totals payload for onboarding/demo UI.
+// Expected storage: a document in `user_daily_totals` with `dateKey: "sample"`.
+// This route is intentionally NOT user-specific and should never affect
+// any user's real history or analysis.
+app.get("/sample-daily-totals", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({
+        ok: false,
+        error: "DB not ready",
+      });
+    }
+
+    const totalsCol = db.collection("user_daily_totals");
+
+    const doc = await totalsCol.findOne(
+      { dateKey: "sample" },
+      { sort: { updatedAt: -1, createdAt: -1 } }
+    );
+
+    if (!doc) {
+      return res.status(404).json({
+        ok: false,
+        error: "Sample daily totals not found",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      dateKey: doc.dateKey || "sample",
+      timezone: doc.timezone || null,
+      totals: doc.totals || {},
+      totals_estimated: doc.totals_estimated || {},
+      updatedAt: doc.updatedAt || null,
+      createdAt: doc.createdAt || null,
+      isSample: doc.isSample === true,
+      excludeFromAnalysis: doc.excludeFromAnalysis === true,
+      label: doc.label || "Sample Day",
+      watermarkText: doc.watermarkText || "SAMPLE",
+    });
+  } catch (err) {
+    console.error("[Sample/DailyTotals] Error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Failed to fetch sample daily totals",
+      details: err && err.message ? err.message : String(err),
+    });
+  }
+});
+
+//------------------------------------------------------------------------------------------------------------------------------------------------
 
 // GET /users/:id/daily-totals?dateKey=YYYY-MM-DD
 // Returns the user's daily nutrition totals from the user_daily_totals collection.
