@@ -408,8 +408,8 @@ export const driV1Bands = [
   // MUFA subtypes (informational)
   { nutrientKey: "mufa_16_1_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "DRI: No specific target established for individual MUFAs (informational tracking)" },
   { nutrientKey: "mufa_18_1_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "DRI: No specific target established for individual MUFAs (informational tracking)" },
-  { nutrientKey: "mufa_20_1_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "DRI: No specific target established for individual MUFAs (informational tracking)" },
-  { nutrientKey: "mufa_22_1_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "DRI: No specific target established for individual MUFAs (informational tracking)" },
+  //{ nutrientKey: "mufa_20_1_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "DRI: No specific target established for individual MUFAs (informational tracking)" },
+  //{ nutrientKey: "mufa_22_1_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "DRI: No specific target established for individual MUFAs (informational tracking)" },
 
   // PUFA + omega targets
   {
@@ -431,7 +431,7 @@ export const driV1Bands = [
   { nutrientKey: "pufa_18_3_g", sex: "female", minYears: 19, maxYears: null, referenceType: "ai", recommended: 1.1, lowerSafe: 0.88, upperSafe: null, upperLimit: null, unit: "g", source: "DRI" },
 
   // Additional PUFA subtypes (informational)
-  { nutrientKey: "pufa_18_4_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for this PUFA subtype (informational tracking)" },
+  //{ nutrientKey: "pufa_18_4_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for this PUFA subtype (informational tracking)" },
   { nutrientKey: "pufa_20_4_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for this PUFA subtype (informational tracking)" },
   {
     nutrientKey: "omega3_marine_g",
