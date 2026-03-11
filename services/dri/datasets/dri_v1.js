@@ -508,11 +508,7 @@ export const driV1Bands = [
     unit: "g",
     source: "American Heart Association guidance (~1 standard sugary serving; ≈25 g added sugar/day for women)",
   },
-  { nutrientKey: "sucrose_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for individual sugars (informational tracking)" },
-  { nutrientKey: "glucose_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for individual sugars (informational tracking)" },
-  { nutrientKey: "fructose_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for individual sugars (informational tracking)" },
-  { nutrientKey: "lactose_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for individual sugars (informational tracking)" },
-  { nutrientKey: "maltose_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for individual sugars (informational tracking)" },
+  
   { nutrientKey: "sugar_alcohol_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "Informational (no specific DRI for sugar alcohols)" },
   { nutrientKey: "sorbitol_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "Informational (sugar alcohol subtype)" },
   { nutrientKey: "mannitol_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "Informational (sugar alcohol subtype)" },
@@ -647,8 +643,8 @@ export const driV1Bands = [
   { nutrientKey: "vitamin_b5_mg", sex: "female", minYears: 19, maxYears: null, referenceType: "ai", recommended: 5, lowerSafe: 4, upperSafe: null, upperLimit: null, unit: "mg", source: "DRI" },
   { nutrientKey: "vitamin_b6_mg", sex: "male", minYears: 19, maxYears: null, referenceType: "rda", recommended: 1.3, lowerSafe: 1.0, upperSafe: 100, upperLimit: 100, unit: "mg", source: "DRI" },
   { nutrientKey: "vitamin_b6_mg", sex: "female", minYears: 19, maxYears: null, referenceType: "rda", recommended: 1.3, lowerSafe: 1.0, upperSafe: 100, upperLimit: 100, unit: "mg", source: "DRI" },
-  { nutrientKey: "vitamin_b7_ug", sex: "male", minYears: 19, maxYears: null, referenceType: "ai", recommended: 30, lowerSafe: 24, upperSafe: null, upperLimit: null, unit: "µg", source: "DRI" },
-  { nutrientKey: "vitamin_b7_ug", sex: "female", minYears: 19, maxYears: null, referenceType: "ai", recommended: 30, lowerSafe: 24, upperSafe: null, upperLimit: null, unit: "µg", source: "DRI" },
+  //{ nutrientKey: "vitamin_b7_ug", sex: "male", minYears: 19, maxYears: null, referenceType: "ai", recommended: 30, lowerSafe: 24, upperSafe: null, upperLimit: null, unit: "µg", source: "DRI" },
+  //{ nutrientKey: "vitamin_b7_ug", sex: "female", minYears: 19, maxYears: null, referenceType: "ai", recommended: 30, lowerSafe: 24, upperSafe: null, upperLimit: null, unit: "µg", source: "DRI" },
   { nutrientKey: "vitamin_b12_ug", sex: "male", minYears: 19, maxYears: null, referenceType: "rda", recommended: 2.4, lowerSafe: 1.9, upperSafe: null, upperLimit: null, unit: "µg", source: "DRI" },
   { nutrientKey: "vitamin_b12_ug", sex: "female", minYears: 19, maxYears: null, referenceType: "rda", recommended: 2.4, lowerSafe: 1.9, upperSafe: null, upperLimit: null, unit: "µg", source: "DRI" },
   { nutrientKey: "folate_dfe_ug", sex: "male", minYears: 19, maxYears: null, referenceType: "rda", recommended: 400, lowerSafe: 320, upperSafe: 1000, upperLimit: 1000, unit: "µg", source: "DRI" },
@@ -728,7 +724,7 @@ export const driV1Bands = [
   { nutrientKey: "alcohol_g", sex: null, minYears: 0, maxYears: 20, referenceType: "guideline_cap", recommended: null, lowerSafe: null, upperSafe: 0, upperLimit: 0, unit: "g", source: "No safe daily alcohol baseline for under-21 users; caution cap fixed at zero" },
   { nutrientKey: "alcohol_g", sex: "male", minYears: 21, maxYears: null, referenceType: "guideline_cap", recommended: null, lowerSafe: null, upperSafe: 28, upperLimit: 28, unit: "g", source: "U.S. moderation guideline cap (~2 standard drinks/day; 14 g alcohol each)" },
   { nutrientKey: "alcohol_g", sex: "female", minYears: 21, maxYears: null, referenceType: "guideline_cap", recommended: null, lowerSafe: null, upperSafe: 14, upperLimit: 14, unit: "g", source: "U.S. moderation guideline cap (~1 standard drink/day; 14 g alcohol each)" },
-  { nutrientKey: "theobromine_mg", sex: null, minYears: 19, maxYears: null, referenceType: "heuristic_ai", recommended: 200, lowerSafe: 50, upperSafe: 600, upperLimit: null, unit: "mg", source: "Heuristic exploratory baseline for cocoa-derived theobromine intake; not an official DRI" },
+  //{ nutrientKey: "theobromine_mg", sex: null, minYears: 19, maxYears: null, referenceType: "heuristic_ai", recommended: 200, lowerSafe: 50, upperSafe: 600, upperLimit: null, unit: "mg", source: "Heuristic exploratory baseline for cocoa-derived theobromine intake; not an official DRI" },
 
   // Choline
   { nutrientKey: "choline_mg", sex: "male", minYears: 19, maxYears: null, referenceType: "ai", recommended: 550, lowerSafe: 425, upperSafe: null, upperLimit: 3500, unit: "mg", source: "DRI" },
@@ -751,8 +747,8 @@ export const driV1Bands = [
 
   // Fluoride (align to stored daily totals: fluoride_ug)
   // DRI values are commonly listed in mg/day; convert to µg/day for storage alignment.
-  { nutrientKey: "fluoride_ug", sex: "male", minYears: 19, maxYears: null, referenceType: "ai", recommended: 4000, lowerSafe: 3000, upperSafe: null, upperLimit: 10000, unit: "µg", source: "DRI" },
-  { nutrientKey: "fluoride_ug", sex: "female", minYears: 19, maxYears: null, referenceType: "ai", recommended: 3000, lowerSafe: 2500, upperSafe: null, upperLimit: 10000, unit: "µg", source: "DRI" },
+ // { nutrientKey: "fluoride_ug", sex: "male", minYears: 19, maxYears: null, referenceType: "ai", recommended: 4000, lowerSafe: 3000, upperSafe: null, upperLimit: 10000, unit: "µg", source: "DRI" },
+ //{ nutrientKey: "fluoride_ug", sex: "female", minYears: 19, maxYears: null, referenceType: "ai", recommended: 3000, lowerSafe: 2500, upperSafe: null, upperLimit: 10000, unit: "µg", source: "DRI" },
 ];
 
 // Default export for consumers that `import dri_v1 from ...`
