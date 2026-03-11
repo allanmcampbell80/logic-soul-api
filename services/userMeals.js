@@ -1253,18 +1253,25 @@ function computeContributionMapsForFood(food, grams, servings, opts = {}) {
         let per100g = toNumber(nutrient.per_100g ?? nutrient.per100g);
         let perServing = toNumber(nutrient.per_serving ?? nutrient.perServing);
 
-        // Special-case: Vitamin A / D sometimes arrive as IU even when we expect µg.
-        // Convert IU -> µg so we can aggregate instead of skipping as a unit mismatch.
-        // Vitamin A: 1 IU ≈ 0.3 µg RAE
-        // Vitamin D: 1 IU = 0.025 µg
+        // Vitamin A / D often appear twice in USDA-derived foods: once as IU and once as µg.
+        // Our totals are stored as vitamin_a_rae_ug / vitamin_d_ug, so if we convert IU here
+        // we can accidentally sum both forms. To avoid double-counting, aggregate only the µg
+        // representation and skip IU entries entirely.
         const isVitAorD = nutrientKey === "vitamin_a" || nutrientKey === "vitamin_d";
         const expectsMicrograms = normalizeUnit(expectedUnit) === "µg";
         const unitIsIU = normalizeUnit(unit) === "iu";
         if (isVitAorD && expectsMicrograms && unitIsIU) {
-          const iuToUg = nutrientKey === "vitamin_a" ? 0.3 : 0.025;
-          if (per100g != null) per100g = per100g * iuToUg;
-          if (perServing != null) perServing = perServing * iuToUg;
-          unit = "µg";
+          debugLog("[recomputeDailyNutritionTotals] skip nutrient (vitamin IU duplicate)", {
+            foodId: food?._id?.toString?.() || null,
+            name: food?.name || food?.common_name || null,
+            nutrientKey,
+            unit,
+            expectedUnit,
+            per100g,
+            perServing,
+            source: nutrient?.source || null,
+          });
+          continue;
         }
 
         if (expectedUnit && unit && String(unit) !== String(expectedUnit)) {
@@ -1918,5 +1925,6 @@ export async function deleteUserMeal(db, userId, mealId) {
     dateKey: dateKey || null,
   };
 }
+
 
 
