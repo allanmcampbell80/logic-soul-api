@@ -175,6 +175,7 @@ const DAILY_PANEL_NUTRIENTS = {
   pufa_20_5_n_3_epa: { field: "epa_g", unit: "g" },
   pufa_22_6_n_3_dha: { field: "dha_g", unit: "g" },
   pufa_22_5_n_3_dpa: { field: "dpa_g", unit: "g" },
+  omega3_marine: { field: "omega3_marine_g", unit: "g" },
 
   // Other macro-adjacent
   cholesterol: { field: "cholesterol_mg", unit: "mg" },
@@ -1471,6 +1472,24 @@ function computeContributionMapsForFood(food, grams, servings, opts = {}) {
     if (Object.is(v, -0)) totals_estimated[k] = 0;
   }
 
+  // Derive combined marine omega-3 once on the server so all downstream consumers
+  // (rings, roundup packs, target views) read the same canonical stored value.
+  totals.omega3_marine_g =
+    (Number(totals.epa_g) || 0) +
+    (Number(totals.dha_g) || 0) +
+    (Number(totals.dpa_g) || 0);
+
+  totals_estimated.omega3_marine_g =
+    (Number(totals_estimated.epa_g) || 0) +
+    (Number(totals_estimated.dha_g) || 0) +
+    (Number(totals_estimated.dpa_g) || 0);
+
+  totals.omega3_marine_g = Math.round((totals.omega3_marine_g + Number.EPSILON) * 10) / 10;
+  totals_estimated.omega3_marine_g = Math.round((totals_estimated.omega3_marine_g + Number.EPSILON) * 10) / 10;
+
+  if (Object.is(totals.omega3_marine_g, -0)) totals.omega3_marine_g = 0;
+  if (Object.is(totals_estimated.omega3_marine_g, -0)) totals_estimated.omega3_marine_g = 0;
+
   // Merge drink-water into daily totals and keep a combined total.
   totals.water_from_drinks_ml = Math.round((waterFromDrinksMl + Number.EPSILON) * 10) / 10;
   totals.water_total_ml = (Number(totals.water_from_food_ml) || 0) + (Number(totals.water_from_drinks_ml) || 0);
@@ -1925,6 +1944,5 @@ export async function deleteUserMeal(db, userId, mealId) {
     dateKey: dateKey || null,
   };
 }
-
 
 
