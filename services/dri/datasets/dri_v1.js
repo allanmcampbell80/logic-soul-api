@@ -483,7 +483,7 @@ export const driV1Bands = [
   { nutrientKey: "lactose_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for individual sugars (informational tracking)" },
   { nutrientKey: "maltose_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for individual sugars (informational tracking)" },
   { nutrientKey: "galactose_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "No specific DRI for individual sugars (informational tracking)" },
-  
+  /*
   {
     nutrientKey: "added_sugars_g",
     sex: "male",
@@ -510,8 +510,8 @@ export const driV1Bands = [
     unit: "g",
     source: "American Heart Association guidance (~1 standard sugary serving; ≈25 g added sugar/day for women)",
   },
-  
-  { nutrientKey: "sugar_alcohol_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "Informational (no specific DRI for sugar alcohols)" },
+  */
+  //{ nutrientKey: "sugar_alcohol_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "Informational (no specific DRI for sugar alcohols)" },
   { nutrientKey: "sorbitol_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "Informational (sugar alcohol subtype)" },
   { nutrientKey: "mannitol_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "Informational (sugar alcohol subtype)" },
   { nutrientKey: "xylitol_g", sex: null, minYears: 19, maxYears: null, referenceType: "ai", recommended: null, lowerSafe: null, upperSafe: null, upperLimit: null, unit: "g", source: "Informational (sugar alcohol subtype)" },
@@ -603,6 +603,7 @@ export const driV1Bands = [
     unit: "µg",
     source: "Heuristic exploratory baseline for beta-cryptoxanthin intake; contributes to vitamin A but has no official standalone DRI",
   },
+  
   {
     nutrientKey: "lycopene_ug",
     sex: null,
@@ -708,14 +709,14 @@ export const driV1Bands = [
   { nutrientKey: "manganese_mg", sex: "female", minYears: 19, maxYears: null, referenceType: "ai", recommended: 1.8, lowerSafe: 1.44, upperSafe: 11, upperLimit: 11, unit: "mg", source: "DRI" },
 
   // Iodine
-  { nutrientKey: "iodine_ug", sex: "male", minYears: 19, maxYears: null, referenceType: "rda", recommended: 150, lowerSafe: 120, upperSafe: 1100, upperLimit: 1100, unit: "µg", source: "DRI" },
-  { nutrientKey: "iodine_ug", sex: "female", minYears: 19, maxYears: null, referenceType: "rda", recommended: 150, lowerSafe: 120, upperSafe: 1100, upperLimit: 1100, unit: "µg", source: "DRI" },
+  //{ nutrientKey: "iodine_ug", sex: "male", minYears: 19, maxYears: null, referenceType: "rda", recommended: 150, lowerSafe: 120, upperSafe: 1100, upperLimit: 1100, unit: "µg", source: "DRI" },
+  //{ nutrientKey: "iodine_ug", sex: "female", minYears: 19, maxYears: null, referenceType: "rda", recommended: 150, lowerSafe: 120, upperSafe: 1100, upperLimit: 1100, unit: "µg", source: "DRI" },
 
   // Chromium
-  { nutrientKey: "chromium_ug", sex: "male", minYears: 19, maxYears: 50, referenceType: "ai", recommended: 35, lowerSafe: 28, upperSafe: null, upperLimit: null, unit: "µg", source: "DRI" },
-  { nutrientKey: "chromium_ug", sex: "male", minYears: 51, maxYears: null, referenceType: "ai", recommended: 30, lowerSafe: 24, upperSafe: null, upperLimit: null, unit: "µg", source: "DRI" },
-  { nutrientKey: "chromium_ug", sex: "female", minYears: 19, maxYears: 50, referenceType: "ai", recommended: 25, lowerSafe: 20, upperSafe: null, upperLimit: null, unit: "µg", source: "DRI" },
-  { nutrientKey: "chromium_ug", sex: "female", minYears: 51, maxYears: null, referenceType: "ai", recommended: 20, lowerSafe: 16, upperSafe: null, upperLimit: null, unit: "µg", source: "DRI" },
+  //{ nutrientKey: "chromium_ug", sex: "male", minYears: 19, maxYears: 50, referenceType: "ai", recommended: 35, lowerSafe: 28, upperSafe: null, upperLimit: null, unit: "µg", source: "DRI" },
+  //{ nutrientKey: "chromium_ug", sex: "male", minYears: 51, maxYears: null, referenceType: "ai", recommended: 30, lowerSafe: 24, upperSafe: null, upperLimit: null, unit: "µg", source: "DRI" },
+  //{ nutrientKey: "chromium_ug", sex: "female", minYears: 19, maxYears: 50, referenceType: "ai", recommended: 25, lowerSafe: 20, upperSafe: null, upperLimit: null, unit: "µg", source: "DRI" },
+  //{ nutrientKey: "chromium_ug", sex: "female", minYears: 51, maxYears: null, referenceType: "ai", recommended: 20, lowerSafe: 16, upperSafe: null, upperLimit: null, unit: "µg", source: "DRI" },
 
   // -----------------
   // OTHER NUTRIENTS
