@@ -15,7 +15,7 @@ import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, delete
 import { getFoodDetails, attachUSDAEquivalentFoodIdToCandidates, attachUSDAEquivalentFoodIdToDoc, chooseBestCanadianDocForUPC,
   fetchBestDocForBarcode, makeBarcodeLockedCandidateFromDoc, applyIngredientMicronutrientEstimates } from "./services/foodDetails.js";
 import { getUserFavoritesByUserId, addUserFavoriteByUserId, deleteUserFavoriteByUserId,} from "./services/favorites.js";
-import { storeUserCorrelationPack, runCorrelationEngineForUser, runCorrelationEngineAndPromoteForUser, fetchUserDayAnalysisPack } from "./services/userAnalysis.js";
+import { storeUserCorrelationPack, runCorrelationEngineAndPromoteForUser, fetchUserDayAnalysisPack, getUserCorrelationProgress,} from "./services/userAnalysis.js";
 import { getAwardsForUser, applyAwardEvent } from "./services/awards.js";
 
 const app = express();
@@ -570,6 +570,8 @@ app.post("/users/:id/daily-goals/seed", async (req, res) => {
     });
   }
 });
+
+//----------------------------------------------------------------------------------------------------------------------------
 
 // PATCH /users/:id/daily-goals → patches one or more keys; body: { <nutrientKey>: number, ... }
 app.patch("/users/:id/daily-goals", async (req, res) => {
@@ -1313,9 +1315,6 @@ app.get("/users/:id/daily-totals", async (req, res) => {
 
 //------------------------------------------------------------------------------------------------------------
 
-
-//------------------------------------------------------------------------------------------------------------
-
 // PATCH /users/:id/daily-totals/checkin
 // Body: { dateKey: "YYYY-MM-DD", patch: { "checkin_mood": 6, ... }, timezone?: "America/Toronto" }
 // Merges patch keys into doc.totals.* and upserts the daily totals doc if missing.
@@ -1805,6 +1804,33 @@ app.get("/users/:id/correlations", async (req, res) => {
   } catch (err) {
     console.error("[Users/Correlations/List] Error:", err);
     return res.status(500).json({ ok: false, error: err?.message || "Failed to fetch correlations" });
+  }
+});
+
+//--------------------------------------------------------------------------------------------------------------------------
+
+app.get("/users/:id/correlation-progress", async (req, res) => {
+  try {
+    if (!db) return res.status(503).json({ ok: false, error: "DB not ready" });
+
+    const userId = String(req.params.id || "").trim();
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "Missing user id" });
+    }
+
+    const progress = await getUserCorrelationProgress(db, { userId });
+
+    return res.json({
+      ok: true,
+      userId,
+      item: progress,
+    });
+  } catch (err) {
+    console.error("GET /users/:id/correlation-progress error", err);
+    return res.status(500).json({
+      ok: false,
+      error: err?.message || "Failed to fetch correlation progress",
+    });
   }
 });
 
