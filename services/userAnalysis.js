@@ -1107,6 +1107,22 @@ export async function runCorrelationEngineForUser(db, options) {
 
 const USER_CORRELATIONS_COLLECTION = "user_correlations";
 
+const PROGRESS_TRACKED_OUTCOMES = new Set([
+  "checkin_mood",
+  "checkin_clarity_score",
+  "checkin_pain_peak",
+  "checkin_pain_region_count",
+  "checkin_energy",
+]);
+
+function isTrackedSignalInputKey(key) {
+  const k = String(key || "").trim().toLowerCase();
+  if (!k) return false;
+  if (k.startsWith("ing:")) return true;
+  if (k.startsWith("macro:")) return false;
+  return true;
+}
+
 function passesV1Threshold(c) {
   // Early surfacing rules (tunable)
   const mode = typeof c.mode === "string" ? c.mode : "";
@@ -1257,6 +1273,136 @@ export async function runCorrelationEngineAndPromoteForUser(db, options) {
   return { ...result, promotedCount: promoted?.newlySurfacedCount ?? 0 };
 }
 
+export async function getUserCorrelationProgress(db, { userId }) {
+  if (!db) throw new Error("DB not ready");
+
+  const userIdRaw = String(userId || "").trim();
+  if (!userIdRaw) throw new Error("Missing userId");
+
+  const userObjectId = new ObjectId(userIdRaw);
+
+  const packsCol = db.collection(COLLECTION);
+  const surfacedCol = db.collection(USER_CORRELATIONS_COLLECTION);
+  const totalsCol = db.collection("user_daily_totals");
+
+  const dayCount = await totalsCol.countDocuments({ userId: userObjectId });
+
+  const latestRoundup = await packsCol.findOne(
+    {
+      userId: userObjectId,
+      algorithmVersion: "daily_roundup_v1",
+    },
+    {
+      sort: { dateKey: -1 },
+      projection: {
+        candidates: 1,
+        dateKey: 1,
+        storedCount: 1,
+        updatedAt: 1,
+        createdAt: 1,
+      },
+    }
+  );
+
+  const latestEnginePack = await packsCol.findOne(
+    {
+      userId: userObjectId,
+      algorithmVersion: "correlation_engine_v1",
+    },
+    {
+      sort: { dateKey: -1 },
+      projection: {
+        candidates: 1,
+        dateKey: 1,
+        storedCount: 1,
+        updatedAt: 1,
+        createdAt: 1,
+      },
+    }
+  );
+
+  const surfacedCount = await surfacedCol.countDocuments({
+    userId: userObjectId,
+    isSurfaced: true,
+  });
+
+  const surfacedItems = await surfacedCol
+    .find(
+      { userId: userObjectId, isSurfaced: true },
+      { projection: { inputKey: 1 } }
+    )
+    .toArray();
+
+  const surfacedInputKeys = new Set(
+    surfacedItems
+      .map((d) => String(d?.inputKey || "").trim())
+      .filter(Boolean)
+  );
+
+  const engineCandidates = Array.isArray(latestEnginePack?.candidates)
+    ? latestEnginePack.candidates
+    : [];
+  const latestRoundupCandidates = Array.isArray(latestRoundup?.candidates)
+    ? latestRoundup.candidates
+    : [];
+
+  const trackedSignalKeys = new Set();
+  const strengtheningSignalKeys = new Set();
+  const trackedIngredientKeys = new Set();
+  const trackedNutrientKeys = new Set();
+
+  for (const c of engineCandidates) {
+    const inputKey = String(c?.inputKey || "").trim();
+    const outputKey = String(c?.outputKey || "").trim();
+    const strength = Number(c?.strength);
+
+    if (!inputKey || !outputKey) continue;
+    if (!PROGRESS_TRACKED_OUTCOMES.has(outputKey)) continue;
+    if (!isTrackedSignalInputKey(inputKey)) continue;
+
+    trackedSignalKeys.add(inputKey);
+
+    if (inputKey.startsWith("ing:")) trackedIngredientKeys.add(inputKey);
+    else trackedNutrientKeys.add(inputKey);
+
+    if (
+      Number.isFinite(strength) &&
+      Math.abs(strength) >= 0.25 &&
+      !surfacedInputKeys.has(inputKey)
+    ) {
+      strengtheningSignalKeys.add(inputKey);
+    }
+  }
+
+  const roundupAttentionCount = latestRoundupCandidates.filter((c) => {
+    const bucket = String(c?.bucket || "").trim().toLowerCase();
+    return bucket === "low" || bucket === "over_safe" || bucket === "over_limit";
+  }).length;
+
+  return {
+    userId: userIdRaw,
+    daysLogged: dayCount,
+    candidateSignals: trackedSignalKeys.size,
+    strengtheningSignals: strengtheningSignalKeys.size,
+    surfacedSignals: surfacedCount,
+    trackedIngredients: trackedIngredientKeys.size,
+    trackedNutrients: trackedNutrientKeys.size,
+    latestRoundupDateKey: latestRoundup?.dateKey || null,
+    latestRoundupCandidateCount:
+      Number(latestRoundup?.storedCount) || latestRoundupCandidates.length || 0,
+    latestRoundupAttentionCount: roundupAttentionCount,
+    latestCorrelationDateKey: latestEnginePack?.dateKey || null,
+    latestCorrelationCandidateCount:
+      Number(latestEnginePack?.storedCount) || engineCandidates.length || 0,
+    updatedAt:
+      latestEnginePack?.updatedAt ||
+      latestEnginePack?.createdAt ||
+      latestRoundup?.updatedAt ||
+      latestRoundup?.createdAt ||
+      null,
+  };
+}
+
 // Fetch a single per-day analysis pack (e.g. daily_roundup_v1) for a user + dateKey.
 // Returns a normalized doc (string id, string userId, no _id) or null if not found.
 export async function fetchUserDayAnalysisPack(db, { userId, dateKey, algorithmVersion }) {
@@ -1372,4 +1518,3 @@ async function ensureFreshDailyRoundupPack(db, { userId, dateKey, existingPack }
     return existingPack || null;
   }
 }
-
