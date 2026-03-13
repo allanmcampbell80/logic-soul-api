@@ -1159,6 +1159,26 @@ function computeCorrelationCycleProgress({
   };
 }
 
+
+function normalizeDateKey(raw) {
+  const s = String(raw || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+}
+
+function deriveDateKeyFromDate(raw) {
+  if (!raw) return null;
+  const d = raw instanceof Date ? raw : new Date(raw);
+  if (!Number.isFinite(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+}
+
+function isDateKeyAfter(dateKey, boundaryDateKey) {
+  const dk = normalizeDateKey(dateKey);
+  const bk = normalizeDateKey(boundaryDateKey);
+  if (!dk || !bk) return false;
+  return dk > bk;
+}
+
 function computeLongTermResearchProgress({
   daysLogged,
   surfacedSignals,
@@ -1339,8 +1359,30 @@ export async function getUserCorrelationProgress(db, { userId }) {
   const packsCol = db.collection(COLLECTION);
   const surfacedCol = db.collection(USER_CORRELATIONS_COLLECTION);
   const totalsCol = db.collection("user_daily_totals");
+  const usersCol = db.collection("users");
+
+  const userDoc = await usersCol.findOne(
+    { _id: userObjectId },
+    {
+      projection: {
+        lastCorrelationRevealAt: 1,
+        lastCorrelationRevealDateKey: 1,
+      },
+    }
+  );
+
+  const lastRevealDateKey =
+    normalizeDateKey(userDoc?.lastCorrelationRevealDateKey) ||
+    deriveDateKeyFromDate(userDoc?.lastCorrelationRevealAt);
 
   const dayCount = await totalsCol.countDocuments({ userId: userObjectId });
+
+  const cycleDayCount = lastRevealDateKey
+    ? await totalsCol.countDocuments({
+        userId: userObjectId,
+        dateKey: { $gt: lastRevealDateKey },
+      })
+    : dayCount;
 
   const latestRoundup = await packsCol.findOne(
     {
@@ -1388,6 +1430,23 @@ export async function getUserCorrelationProgress(db, { userId }) {
     )
     .toArray();
 
+  const allTrackedCorrelationDocs = await surfacedCol
+    .find(
+      { userId: userObjectId },
+      {
+        projection: {
+          inputKey: 1,
+          isSurfaced: 1,
+          firstSeenDateKey: 1,
+          lastSeenDateKey: 1,
+          surfacedDateKey: 1,
+          confirmStreak: 1,
+          strength: 1,
+        },
+      }
+    )
+    .toArray();
+
   const surfacedInputKeys = new Set(
     surfacedItems
       .map((d) => String(d?.inputKey || "").trim())
@@ -1405,6 +1464,10 @@ export async function getUserCorrelationProgress(db, { userId }) {
   const strengtheningSignalKeys = new Set();
   const trackedIngredientKeys = new Set();
   const trackedNutrientKeys = new Set();
+
+  const cycleCandidateSignalKeys = new Set();
+  const cycleStrengtheningSignalKeys = new Set();
+  const cycleSurfacedSignalKeys = new Set();
 
   for (const c of engineCandidates) {
     const inputKey = String(c?.inputKey || "").trim();
@@ -1429,11 +1492,45 @@ export async function getUserCorrelationProgress(db, { userId }) {
     }
   }
 
+  for (const d of allTrackedCorrelationDocs) {
+    const inputKey = String(d?.inputKey || "").trim();
+    if (!inputKey) continue;
+    if (!isTrackedSignalInputKey(inputKey)) continue;
+
+    const firstSeenDateKey = normalizeDateKey(d?.firstSeenDateKey);
+    const lastSeenDateKey = normalizeDateKey(d?.lastSeenDateKey);
+    const surfacedDateKey = normalizeDateKey(d?.surfacedDateKey);
+    const confirmStreak = Number.isFinite(Number(d?.confirmStreak)) ? Number(d.confirmStreak) : 0;
+    const strength = Number(d?.strength);
+    const isSurfaced = d?.isSurfaced === true;
+
+    const isInCurrentCycle = !lastRevealDateKey || (firstSeenDateKey && isDateKeyAfter(firstSeenDateKey, lastRevealDateKey));
+    if (!isInCurrentCycle) continue;
+
+    cycleCandidateSignalKeys.add(inputKey);
+
+    if (inputKey.startsWith("ing:")) {
+      // no-op here; ingredient long-term counts already come from latest engine pack
+    }
+
+    if (isSurfaced && surfacedDateKey && (!lastRevealDateKey || isDateKeyAfter(surfacedDateKey, lastRevealDateKey))) {
+      cycleSurfacedSignalKeys.add(inputKey);
+    }
+
+    if (!isSurfaced) {
+      const looksStrong = (Number.isFinite(strength) && Math.abs(strength) >= 0.25) || confirmStreak >= 1;
+      const seenThisCycle = !lastRevealDateKey || (lastSeenDateKey && isDateKeyAfter(lastSeenDateKey, lastRevealDateKey));
+      if (looksStrong && seenThisCycle) {
+        cycleStrengtheningSignalKeys.add(inputKey);
+      }
+    }
+  }
+
   const cycleProgress = computeCorrelationCycleProgress({
-    daysLogged: dayCount,
-    candidateSignals: trackedSignalKeys.size,
-    strengtheningSignals: strengtheningSignalKeys.size,
-    surfacedSignals: surfacedCount,
+    daysLogged: cycleDayCount,
+    candidateSignals: cycleCandidateSignalKeys.size,
+    strengtheningSignals: cycleStrengtheningSignalKeys.size,
+    surfacedSignals: cycleSurfacedSignalKeys.size,
   });
 
   const longTermProgress = computeLongTermResearchProgress({
@@ -1450,16 +1547,20 @@ export async function getUserCorrelationProgress(db, { userId }) {
 
   return {
     userId: userIdRaw,
-    daysLogged: dayCount,
-    candidateSignals: trackedSignalKeys.size,
-    strengtheningSignals: strengtheningSignalKeys.size,
-    surfacedSignals: surfacedCount,
+    daysLogged: cycleDayCount,
+    candidateSignals: cycleCandidateSignalKeys.size,
+    strengtheningSignals: cycleStrengtheningSignalKeys.size,
+    surfacedSignals: cycleSurfacedSignalKeys.size,
+    totalDaysLogged: dayCount,
+    totalSurfacedSignals: surfacedCount,
+    lastRevealDateKey: lastRevealDateKey || null,
     trackedIngredients: trackedIngredientKeys.size,
     trackedNutrients: trackedNutrientKeys.size,
     cycleProgress,
     longTermProgress,
+    totalCandidateSignals: trackedSignalKeys.size,
     estimatedFirstRevealReadiness: cycleProgress.overallCycleProgress,
-    earlyRevealAvailable: strengtheningSignalKeys.size > 0,
+    earlyRevealAvailable: cycleStrengtheningSignalKeys.size > 0,
     latestRoundupDateKey: latestRoundup?.dateKey || null,
     latestRoundupCandidateCount:
       Number(latestRoundup?.storedCount) || latestRoundupCandidates.length || 0,
