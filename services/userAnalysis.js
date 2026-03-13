@@ -1572,7 +1572,7 @@ export async function getUserCorrelationProgress(db, { userId }) {
     longTermProgress,
     totalCandidateSignals: trackedSignalKeys.size,
     estimatedFirstRevealReadiness: cycleProgress.overallCycleProgress,
-    earlyRevealAvailable: cycleStrengtheningSignalKeys.size > 0,
+    earlyRevealAvailable: effectiveCycleStrengtheningSignals > 0,
     latestRoundupDateKey: latestRoundup?.dateKey || null,
     latestRoundupCandidateCount:
       Number(latestRoundup?.storedCount) || latestRoundupCandidates.length || 0,
