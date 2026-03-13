@@ -1123,6 +1123,61 @@ function isTrackedSignalInputKey(key) {
   return true;
 }
 
+function clamp01(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(1, n));
+}
+
+function roundProgress(v) {
+  return Math.round(clamp01(v) * 1000) / 1000;
+}
+
+function computeCorrelationCycleProgress({
+  daysLogged,
+  candidateSignals,
+  strengtheningSignals,
+  surfacedSignals,
+}) {
+  const foundationProgress = roundProgress((Number(daysLogged) || 0) / 30);
+  const patternProgress = roundProgress((Number(candidateSignals) || 0) / 25);
+
+  const strengtheningBase = (Number(strengtheningSignals) || 0) / 8;
+  const confirmationProgress = roundProgress(
+    Math.max(strengtheningBase, (Number(surfacedSignals) || 0) > 0 ? 1 : 0)
+  );
+
+  const overallCycleProgress = roundProgress(
+    (foundationProgress + patternProgress + confirmationProgress) / 3
+  );
+
+  return {
+    foundationProgress,
+    patternProgress,
+    confirmationProgress,
+    overallCycleProgress,
+  };
+}
+
+function computeLongTermResearchProgress({
+  daysLogged,
+  surfacedSignals,
+  trackedSignalCount,
+  trackedIngredients,
+}) {
+  const daysFactor = clamp01((Number(daysLogged) || 0) / 180);
+  const surfacedFactor = clamp01((Number(surfacedSignals) || 0) / 5);
+  const signalCoverageFactor = clamp01((Number(trackedSignalCount) || 0) / 30);
+  const ingredientCoverageFactor = clamp01((Number(trackedIngredients) || 0) / 20);
+
+  return roundProgress(
+    (daysFactor * 0.5) +
+      (surfacedFactor * 0.2) +
+      (signalCoverageFactor * 0.2) +
+      (ingredientCoverageFactor * 0.1)
+  );
+}
+
 function passesV1Threshold(c) {
   // Early surfacing rules (tunable)
   const mode = typeof c.mode === "string" ? c.mode : "";
@@ -1374,6 +1429,20 @@ export async function getUserCorrelationProgress(db, { userId }) {
     }
   }
 
+  const cycleProgress = computeCorrelationCycleProgress({
+    daysLogged: dayCount,
+    candidateSignals: trackedSignalKeys.size,
+    strengtheningSignals: strengtheningSignalKeys.size,
+    surfacedSignals: surfacedCount,
+  });
+
+  const longTermProgress = computeLongTermResearchProgress({
+    daysLogged: dayCount,
+    surfacedSignals: surfacedCount,
+    trackedSignalCount: trackedSignalKeys.size,
+    trackedIngredients: trackedIngredientKeys.size,
+  });
+
   const roundupAttentionCount = latestRoundupCandidates.filter((c) => {
     const bucket = String(c?.bucket || "").trim().toLowerCase();
     return bucket === "low" || bucket === "over_safe" || bucket === "over_limit";
@@ -1387,6 +1456,10 @@ export async function getUserCorrelationProgress(db, { userId }) {
     surfacedSignals: surfacedCount,
     trackedIngredients: trackedIngredientKeys.size,
     trackedNutrients: trackedNutrientKeys.size,
+    cycleProgress,
+    longTermProgress,
+    estimatedFirstRevealReadiness: cycleProgress.overallCycleProgress,
+    earlyRevealAvailable: strengtheningSignalKeys.size > 0,
     latestRoundupDateKey: latestRoundup?.dateKey || null,
     latestRoundupCandidateCount:
       Number(latestRoundup?.storedCount) || latestRoundupCandidates.length || 0,
@@ -1518,3 +1591,4 @@ async function ensureFreshDailyRoundupPack(db, { userId, dateKey, existingPack }
     return existingPack || null;
   }
 }
+
