@@ -1526,11 +1526,23 @@ export async function getUserCorrelationProgress(db, { userId }) {
     }
   }
 
+  const effectiveCycleDaysLogged =
+    !lastRevealDateKey ? dayCount : cycleDayCount;
+
+  const effectiveCycleCandidateSignals =
+    !lastRevealDateKey ? trackedSignalKeys.size : cycleCandidateSignalKeys.size;
+
+  const effectiveCycleStrengtheningSignals =
+    !lastRevealDateKey ? strengtheningSignalKeys.size : cycleStrengtheningSignalKeys.size;
+
+  const effectiveCycleSurfacedSignals =
+    !lastRevealDateKey ? surfacedCount : cycleSurfacedSignalKeys.size;
+
   const cycleProgress = computeCorrelationCycleProgress({
-    daysLogged: cycleDayCount,
-    candidateSignals: cycleCandidateSignalKeys.size,
-    strengtheningSignals: cycleStrengtheningSignalKeys.size,
-    surfacedSignals: cycleSurfacedSignalKeys.size,
+    daysLogged: effectiveCycleDaysLogged,
+    candidateSignals: effectiveCycleCandidateSignals,
+    strengtheningSignals: effectiveCycleStrengtheningSignals,
+    surfacedSignals: effectiveCycleSurfacedSignals,
   });
 
   const longTermProgress = computeLongTermResearchProgress({
@@ -1547,10 +1559,10 @@ export async function getUserCorrelationProgress(db, { userId }) {
 
   return {
     userId: userIdRaw,
-    daysLogged: cycleDayCount,
-    candidateSignals: cycleCandidateSignalKeys.size,
-    strengtheningSignals: cycleStrengtheningSignalKeys.size,
-    surfacedSignals: cycleSurfacedSignalKeys.size,
+    daysLogged: effectiveCycleDaysLogged,
+    candidateSignals: effectiveCycleCandidateSignals,
+    strengtheningSignals: effectiveCycleStrengtheningSignals,
+    surfacedSignals: effectiveCycleSurfacedSignals,
     totalDaysLogged: dayCount,
     totalSurfacedSignals: surfacedCount,
     lastRevealDateKey: lastRevealDateKey || null,
@@ -1692,4 +1704,3 @@ async function ensureFreshDailyRoundupPack(db, { userId, dateKey, existingPack }
     return existingPack || null;
   }
 }
-
