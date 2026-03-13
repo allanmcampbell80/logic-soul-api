@@ -13,6 +13,37 @@ import { coerceUserIdValue } from "./utils.js";
 
 const COLLECTION = "user_analysis_correlation_packs";
 
+export async function markCorrelationRevealForUser(db, { userId, dateKey = null }) {
+  if (!db) throw new Error("DB not ready");
+
+  const userIdRaw = String(userId || "").trim();
+  if (!userIdRaw) throw new Error("Missing userId");
+
+  const userObjectId = new ObjectId(userIdRaw);
+  const usersCol = db.collection("users");
+
+  const now = new Date();
+  const resolvedDateKey =
+    normalizeDateKey(dateKey) || now.toISOString().slice(0, 10);
+
+  await usersCol.updateOne(
+    { _id: userObjectId },
+    {
+      $set: {
+        lastCorrelationRevealAt: now,
+        lastCorrelationRevealDateKey: resolvedDateKey,
+        updatedAt: now,
+      },
+    }
+  );
+
+  return {
+    userId: userIdRaw,
+    lastCorrelationRevealAt: now,
+    lastCorrelationRevealDateKey: resolvedDateKey,
+  };
+}
+
 export async function storeUserCorrelationPack(db, payload) {
   const { userId, dateKey, algorithmVersion, candidates, windowDays, lagDays } = payload || {};
 
@@ -1737,4 +1768,3 @@ async function ensureFreshDailyRoundupPack(db, { userId, dateKey, existingPack }
     return existingPack || null;
   }
 }
-
