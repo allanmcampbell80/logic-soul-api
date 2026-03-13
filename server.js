@@ -1695,6 +1695,25 @@ app.get("/user-analysis/debug-window", async (req, res) => {
   }
 });
 
+//---------------------------------------------------------------------------------------------------------------------------------
+
+// Set a correlation reveal tag.
+
+router.post("/users/:id/correlation-reveal", async (req, res) => {
+  try {
+    const out = await markCorrelationRevealForUser(req.app.locals.db, {
+      userId: req.params.id,
+      dateKey: req.body?.dateKey || null,
+    });
+
+    res.json({ ok: true, ...out });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || "Failed to mark reveal" });
+  }
+});
+
+//------------------------------------------------------------------------------------------------------------------------------------
+
 // GET /users/:id/correlations
 // Returns user-facing (surfaced) correlations from `user_correlations`.
 // Query params:
