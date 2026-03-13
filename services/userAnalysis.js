@@ -1216,6 +1216,21 @@ function passesV1Threshold(c) {
   return Math.abs(strength) >= 0.8;
 }
 
+function passesEarlyRevealThreshold(c) {
+  const mode = typeof c.mode === "string" ? c.mode : "";
+  const strength = typeof c.strength === "number" ? c.strength : Number(c.strength);
+  if (!Number.isFinite(strength)) return false;
+
+  const n = Number.isFinite(Number(c.n)) ? Number(c.n) : null;
+  if (n !== null && n < 8) return false;
+
+  if (mode === "continuous_spearman") {
+    return Math.abs(strength) >= 0.25;
+  }
+
+  return Math.abs(strength) >= 0.6;
+}
+
 function buildCorrelationKey(c, lagDaysFallback = 1) {
   const inputKey = typeof c.inputKey === "string" ? c.inputKey.trim() : "";
   const outputKey = typeof c.outputKey === "string" ? c.outputKey.trim() : "";
@@ -1272,7 +1287,11 @@ export async function promoteCorrelationCandidates(db, payload) {
     // - seenCount: how many engine runs this candidate appeared in
     // - confirmStreak: consecutive runs meeting strength threshold
     // - isSurfaced: whether we show it to the user
-    // Promotion rule (v1): seenCount >= 5 AND confirmStreak >= 2
+    //
+    // Promotion rules:
+    // 1) Standard long-term surfacing: seenCount >= 5 AND confirmStreak >= 2
+    // 2) Early reveal surfacing: very strong candidates can surface sooner so the
+    //    reveal screen is never empty once the system says meaningful findings exist.
 
     const update = {
       $set: {
@@ -1311,12 +1330,27 @@ export async function promoteCorrelationCandidates(db, payload) {
 
     const confirmStreak = isStrongNow ? confirmStreakPrev + 1 : 0;
 
-    const shouldSurface = !isSurfacedPrev && seenCount >= 5 && confirmStreak >= 2;
+    const passesEarly = passesEarlyRevealThreshold(c);
+
+    const shouldSurface = !isSurfacedPrev && (
+      (seenCount >= 5 && confirmStreak >= 2) ||
+      (passesEarly && seenCount >= 2 && confirmStreak >= 1)
+    );
 
     const patch = {
       $set: {
         confirmStreak,
-        ...(shouldSurface ? { isSurfaced: true, surfacedAt: now, surfacedDateKey: dateKey } : {}),
+        ...(shouldSurface
+          ? {
+              isSurfaced: true,
+              surfacedAt: now,
+              surfacedDateKey: dateKey,
+              surfacedReason:
+                seenCount >= 5 && confirmStreak >= 2
+                  ? "standard_threshold"
+                  : "early_reveal_threshold",
+            }
+          : {}),
       },
     };
 
