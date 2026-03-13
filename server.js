@@ -15,7 +15,7 @@ import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, delete
 import { getFoodDetails, attachUSDAEquivalentFoodIdToCandidates, attachUSDAEquivalentFoodIdToDoc, chooseBestCanadianDocForUPC,
   fetchBestDocForBarcode, makeBarcodeLockedCandidateFromDoc, applyIngredientMicronutrientEstimates } from "./services/foodDetails.js";
 import { getUserFavoritesByUserId, addUserFavoriteByUserId, deleteUserFavoriteByUserId,} from "./services/favorites.js";
-import { storeUserCorrelationPack, runCorrelationEngineAndPromoteForUser, fetchUserDayAnalysisPack, getUserCorrelationProgress,} from "./services/userAnalysis.js";
+import { storeUserCorrelationPack, runCorrelationEngineAndPromoteForUser, fetchUserDayAnalysisPack, getUserCorrelationProgress, markCorrelationRevealForUser} from "./services/userAnalysis.js";
 import { getAwardsForUser, applyAwardEvent } from "./services/awards.js";
 
 const app = express();
