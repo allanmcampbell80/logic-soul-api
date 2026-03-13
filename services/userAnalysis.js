@@ -1311,7 +1311,6 @@ export async function promoteCorrelationCandidates(db, payload) {
       $setOnInsert: {
         createdAt: now,
         firstSeenDateKey: dateKey,
-        seenCount: 0,
         confirmStreak: 0,
         isSurfaced: false,
       },
@@ -1738,3 +1737,4 @@ async function ensureFreshDailyRoundupPack(db, { userId, dateKey, existingPack }
     return existingPack || null;
   }
 }
+
