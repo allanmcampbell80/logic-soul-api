@@ -1701,14 +1701,22 @@ app.get("/user-analysis/debug-window", async (req, res) => {
 
 app.post("/users/:id/correlation-reveal", async (req, res) => {
   try {
-    const out = await markCorrelationRevealForUser(req.app.locals.db, {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const out = await markCorrelationRevealForUser(db, {
       userId: req.params.id,
       dateKey: req.body?.dateKey || null,
     });
 
-    res.json({ ok: true, ...out });
+    return res.json({ ok: true, ...out });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message || "Failed to mark reveal" });
+    console.error("[CorrelationReveal] Error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: err?.message || "Failed to mark correlation reveal",
+    });
   }
 });
 
