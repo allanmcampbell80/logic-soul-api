@@ -1958,42 +1958,60 @@ app.post("/user-analysis/correlation-pack", async (req, res) => {
 // Body: { userId: string, windowDays?: number, minSupportDays?: number, topK?: number }
 app.post("/user-analysis/run-correlation-engine", async (req, res) => {
   try {
-    if (!db) return res.status(500).json({ ok: false, error: "DB not ready" });
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
 
     const userId = String(req.body?.userId || "").trim();
-    if (!userId) return res.status(400).json({ ok: false, error: "Missing required field 'userId'." });
+    if (!userId || !ObjectId.isValid(userId)) {
+      return res.status(400).json({ ok: false, error: "Missing or invalid userId" });
+    }
 
-    const windowDaysRaw = req.body?.windowDays;
-    const minSupportDaysRaw = req.body?.minSupportDays;
-    const topKRaw = req.body?.topK;
+    const windowDays = Number.isFinite(Number(req.body?.windowDays))
+      ? Number(req.body.windowDays)
+      : 120;
 
-    const windowDays =
-      typeof windowDaysRaw === "number" && Number.isFinite(windowDaysRaw) && windowDaysRaw > 7 && windowDaysRaw <= 365
-        ? Math.trunc(windowDaysRaw)
-        : 120;
+    const lagDays = Number.isFinite(Number(req.body?.lagDays))
+      ? Number(req.body.lagDays)
+      : 1;
 
-    const minSupportDays =
-      typeof minSupportDaysRaw === "number" && Number.isFinite(minSupportDaysRaw) && minSupportDaysRaw >= 2 && minSupportDaysRaw <= 30
-        ? Math.trunc(minSupportDaysRaw)
-        : 4;
+    const minSupportDays = Number.isFinite(Number(req.body?.minSupportDays))
+      ? Number(req.body.minSupportDays)
+      : 4;
 
-    const topK =
-      typeof topKRaw === "number" && Number.isFinite(topKRaw) && topKRaw >= 10 && topKRaw <= 500
-        ? Math.trunc(topKRaw)
-        : 150;
+    const topK = Number.isFinite(Number(req.body?.topK))
+      ? Number(req.body.topK)
+      : 150;
 
-    const result = await runCorrelationEngineAndPromoteForUser(db, {
+    // Start background work and return immediately.
+    setTimeout(() => {
+      runCorrelationEngineAndPromoteForUser(db, {
+        userId,
+        windowDays,
+        lagDays,
+        minSupportDays,
+        topK,
+      }).catch((err) => {
+        console.error("[RunCorrelationEngineBackground] Error:", err);
+      });
+    }, 0);
+
+    return res.status(202).json({
+      ok: true,
+      started: true,
       userId,
       windowDays,
-      lagDays: 1,
+      lagDays,
       minSupportDays,
       topK,
+      message: "Correlation engine started in background",
     });
-
-    return res.json({ ok: true, ...result });
   } catch (err) {
-    console.error("[UserAnalysis/RunCorrelationEngine] Error:", err);
-    return res.status(500).json({ ok: false, error: err?.message || "Failed to run correlation engine" });
+    console.error("[RunCorrelationEngine] Error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: err?.message || "Failed to start correlation engine",
+    });
   }
 });
 
