@@ -1143,6 +1143,8 @@ const USER_CORRELATIONS_COLLECTION = "user_correlations";
 
 const USER_CORRELATION_JOBS_COLLECTION = "user_analysis_jobs";
 
+const USER_CORRELATION_REVEALS_COLLECTION = "user_analysis_reveals";
+
 const PROGRESS_TRACKED_OUTCOMES = new Set([
   "checkin_mood",
   "checkin_clarity_score",
@@ -1279,6 +1281,87 @@ function buildCorrelationKey(c, lagDaysFallback = 1) {
   const mode = typeof c.mode === "string" && c.mode.trim() ? c.mode.trim() : "unknown";
   const lagDays = Number.isFinite(Number(c.lagDays)) ? Math.trunc(Number(c.lagDays)) : lagDaysFallback;
   return { inputKey, outputKey, mode, lagDays };
+}
+
+function normalizeRevealSummary(summary) {
+  const s = summary && typeof summary === "object" ? summary : {};
+
+  const headline = typeof s.headline === "string" ? s.headline.trim() : "";
+  const body = typeof s.summary === "string" ? s.summary.trim() : "";
+  const disclaimer = typeof s.disclaimer === "string" ? s.disclaimer.trim() : "";
+
+  const signals = Array.isArray(s.signals)
+    ? s.signals
+        .map((item) => {
+          if (!item || typeof item !== "object") return null;
+          const title = typeof item.title === "string" ? item.title.trim() : "";
+          const insight = typeof item.insight === "string" ? item.insight.trim() : "";
+          const confidence = typeof item.confidence === "string" ? item.confidence.trim() : "";
+          if (!title && !insight) return null;
+          return {
+            ...(title ? { title } : {}),
+            ...(insight ? { insight } : {}),
+            ...(confidence ? { confidence } : {}),
+          };
+        })
+        .filter(Boolean)
+        .slice(0, 8)
+    : [];
+
+  const watchFors = Array.isArray(s.watchFors)
+    ? s.watchFors
+        .map((item) => (typeof item === "string" ? item.trim() : ""))
+        .filter(Boolean)
+        .slice(0, 8)
+    : [];
+
+  return {
+    ...(headline ? { headline } : {}),
+    ...(body ? { summary: body } : {}),
+    ...(signals.length ? { signals } : {}),
+    ...(watchFors.length ? { watchFors } : {}),
+    ...(disclaimer ? { disclaimer } : {}),
+  };
+}
+
+function normalizeRevealCorrelationItem(item) {
+  if (!item || typeof item !== "object") return null;
+
+  const inputKey = typeof item.inputKey === "string" ? item.inputKey.trim() : "";
+  const outputKey = typeof item.outputKey === "string" ? item.outputKey.trim() : "";
+  const direction = typeof item.direction === "string" ? item.direction.trim() : "";
+  const mode = typeof item.mode === "string" ? item.mode.trim() : "";
+
+  const strength = Number(item.strength);
+  const n = Number(item.n);
+  const lagDays = Number(item.lagDays);
+  const isSurfaced = item.isSurfaced === true;
+
+  if (!inputKey || !outputKey) return null;
+
+  return {
+    inputKey,
+    outputKey,
+    ...(direction ? { direction } : {}),
+    ...(Number.isFinite(strength) ? { strength } : {}),
+    ...(Number.isFinite(n) ? { n: Math.trunc(n) } : {}),
+    ...(Number.isFinite(lagDays) ? { lagDays: Math.trunc(lagDays) } : {}),
+    ...(mode ? { mode } : {}),
+    ...(isSurfaced ? { isSurfaced: true } : {}),
+  };
+}
+
+function normalizeRevealJobMeta(jobMeta) {
+  const j = jobMeta && typeof jobMeta === "object" ? jobMeta : {};
+  const totalCandidates = Number(j.totalCandidates);
+  const processedCandidates = Number(j.processedCandidates);
+  const surfacedCount = Number(j.surfacedCount);
+
+  return {
+    ...(Number.isFinite(totalCandidates) ? { totalCandidates: Math.trunc(totalCandidates) } : {}),
+    ...(Number.isFinite(processedCandidates) ? { processedCandidates: Math.trunc(processedCandidates) } : {}),
+    ...(Number.isFinite(surfacedCount) ? { surfacedCount: Math.trunc(surfacedCount) } : {}),
+  };
 }
 
 async function upsertCorrelationJobStatus(db, { userId, patch }) {
@@ -1842,6 +1925,113 @@ export async function getUserCorrelationProgress(db, { userId }) {
       latestRoundup?.createdAt ||
       null,
   };
+}
+
+export async function saveUserCorrelationRevealSnapshot(db, payload) {
+  if (!db) throw new Error("DB not ready");
+
+  const userIdRaw = String(payload?.userId || "").trim();
+  if (!userIdRaw) throw new Error("Missing userId");
+
+  let userObjectId;
+  try {
+    userObjectId = new ObjectId(userIdRaw);
+  } catch {
+    throw new Error("userId must be a valid ObjectId string");
+  }
+
+  const dateKey = normalizeDateKey(payload?.dateKey) || new Date().toISOString().slice(0, 10);
+  const surfacedCount = Number(payload?.surfacedCount);
+  const totalCount = Number(payload?.totalCount);
+  const summary = normalizeRevealSummary(payload?.summary);
+
+  const correlations = Array.isArray(payload?.correlations)
+    ? payload.correlations
+        .map(normalizeRevealCorrelationItem)
+        .filter(Boolean)
+        .slice(0, 200)
+    : [];
+
+  const jobMeta = normalizeRevealJobMeta(payload?.jobMeta);
+
+  const doc = {
+    userId: userObjectId,
+    dateKey,
+    surfacedCount: Number.isFinite(surfacedCount)
+      ? Math.trunc(surfacedCount)
+      : correlations.filter((c) => c.isSurfaced === true).length,
+    totalCount: Number.isFinite(totalCount)
+      ? Math.trunc(totalCount)
+      : correlations.length,
+    correlationCount: correlations.length,
+    correlations,
+    ...(Object.keys(summary).length ? { summary } : {}),
+    ...(Object.keys(jobMeta).length ? { jobMeta } : {}),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
+  const col = db.collection(USER_CORRELATION_REVEALS_COLLECTION);
+  const result = await col.insertOne(doc);
+
+  return {
+    ok: true,
+    revealId: String(result.insertedId),
+    userId: userIdRaw,
+    dateKey,
+    storedCount: correlations.length,
+  };
+}
+
+export async function fetchUserCorrelationRevealHistory(db, { userId, limit = 20 } = {}) {
+  if (!db) throw new Error("DB not ready");
+
+  const userIdRaw = String(userId || "").trim();
+  if (!userIdRaw) throw new Error("Missing userId");
+
+  let userObjectId;
+  try {
+    userObjectId = new ObjectId(userIdRaw);
+  } catch {
+    throw new Error("userId must be a valid ObjectId string");
+  }
+
+  const cappedLimit = Math.max(1, Math.min(50, Math.trunc(Number(limit) || 20)));
+  const col = db.collection(USER_CORRELATION_REVEALS_COLLECTION);
+
+  const docs = await col
+    .find(
+      { userId: userObjectId },
+      {
+        projection: {
+          userId: 1,
+          dateKey: 1,
+          surfacedCount: 1,
+          totalCount: 1,
+          correlationCount: 1,
+          summary: 1,
+          jobMeta: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      }
+    )
+    .sort({ createdAt: -1, _id: -1 })
+    .limit(cappedLimit)
+    .toArray();
+
+  return docs.map((doc) => ({
+    id: String(doc._id),
+    userId: userIdRaw,
+    dateKey: doc.dateKey || null,
+    surfacedCount: Number.isFinite(Number(doc.surfacedCount)) ? Number(doc.surfacedCount) : 0,
+    totalCount: Number.isFinite(Number(doc.totalCount)) ? Number(doc.totalCount) : 0,
+    correlationCount: Number.isFinite(Number(doc.correlationCount)) ? Number(doc.correlationCount) : 0,
+    summary: doc.summary || null,
+    jobMeta: doc.jobMeta || null,
+    createdAt: doc.createdAt || null,
+    updatedAt: doc.updatedAt || null,
+  }));
 }
 
 // Fetch a single per-day analysis pack (e.g. daily_roundup_v1) for a user + dateKey.
