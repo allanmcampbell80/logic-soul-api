@@ -1374,6 +1374,14 @@ export async function promoteCorrelationCandidates(db, payload) {
   const col = db.collection(USER_CORRELATIONS_COLLECTION);
   const now = new Date();
 
+  // Detect whether this is the very first population for this user.
+  // If so, allow strong candidates to surface on the same pass so first reveal is not empty.
+  const existingForUser = await col.findOne(
+    { userId: userObjectId },
+    { projection: { _id: 1 } }
+  );
+  const isInitialPopulation = !existingForUser;
+
   // Only consider candidates that pass minimal schema sanity.
   const normalized = candidates.map((c) => normalizeCandidate(c)).filter(Boolean);
 
@@ -1444,7 +1452,8 @@ export async function promoteCorrelationCandidates(db, payload) {
 
     const shouldSurface = !isSurfacedPrev && (
       (seenCount >= 5 && confirmStreak >= 2) ||
-      (passesEarly && seenCount >= 2 && confirmStreak >= 1)
+      (passesEarly && seenCount >= 2 && confirmStreak >= 1) ||
+      (isInitialPopulation && passesEarly && confirmStreak >= 1)
     );
 
     const patch = {
@@ -1458,7 +1467,9 @@ export async function promoteCorrelationCandidates(db, payload) {
               surfacedReason:
                 seenCount >= 5 && confirmStreak >= 2
                   ? "standard_threshold"
-                  : "early_reveal_threshold",
+                  : (isInitialPopulation && passesEarly && confirmStreak >= 1)
+                    ? "initial_reveal_threshold"
+                    : "early_reveal_threshold",
             }
           : {}),
       },
