@@ -1257,10 +1257,10 @@ function passesEarlyRevealThreshold(c) {
   if (n !== null && n < 8) return false;
 
   if (mode === "continuous_spearman") {
-    return Math.abs(strength) >= 0.25;
+    return Math.abs(strength) >= 0.4;
   }
 
-  return Math.abs(strength) >= 0.6;
+  return Math.abs(strength) >= 1.0;
 }
 
 function buildCorrelationKey(c, lagDaysFallback = 1) {
