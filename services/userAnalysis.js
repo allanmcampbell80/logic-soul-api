@@ -1125,6 +1125,7 @@ export async function runCorrelationEngineForUser(db, options) {
     storedCount: stored?.storedCount ?? top.length,
     promotedCount: 0,
     top: top.slice(0, Math.min(50, top.length)),
+    promotionCandidates: top,
     roundup: { storedCount: roundupStoredCount, dateKey: roundupDateKey, backfilledDays: roundupBackfilledDays },
     dateKey: endDateKey,
   };
@@ -1397,7 +1398,9 @@ export async function runCorrelationEngineAndPromoteForUser(db, options) {
   const result = await runCorrelationEngineForUser(db, options);
 
   // If there are no candidates (or not enough days), nothing to promote.
-  const candidates = Array.isArray(result?.top) ? result.top : [];
+  const candidates = Array.isArray(result?.promotionCandidates)
+    ? result.promotionCandidates
+    : (Array.isArray(result?.top) ? result.top : []);
   if (candidates.length === 0) {
     return { ...result, promotedCount: 0 };
   }
