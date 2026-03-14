@@ -1374,14 +1374,6 @@ export async function promoteCorrelationCandidates(db, payload) {
   const col = db.collection(USER_CORRELATIONS_COLLECTION);
   const now = new Date();
 
-  // If this user has no tracked correlations yet, allow a first-reveal surfacing path
-  // so the first intentional reveal is not empty.
-  const existingForUser = await col.findOne(
-    { userId: userObjectId },
-    { projection: { _id: 1 } }
-  );
-  const isInitialPopulation = !existingForUser;
-
   // Only consider candidates that pass minimal schema sanity.
   const normalized = candidates.map((c) => normalizeCandidate(c)).filter(Boolean);
 
@@ -1452,8 +1444,7 @@ export async function promoteCorrelationCandidates(db, payload) {
 
     const shouldSurface = !isSurfacedPrev && (
       (seenCount >= 5 && confirmStreak >= 2) ||
-      (passesEarly && seenCount >= 2 && confirmStreak >= 1) ||
-      (isInitialPopulation && passesEarly && confirmStreak >= 1)
+      (passesEarly && seenCount >= 2 && confirmStreak >= 1)
     );
 
     const patch = {
@@ -1467,9 +1458,7 @@ export async function promoteCorrelationCandidates(db, payload) {
               surfacedReason:
                 seenCount >= 5 && confirmStreak >= 2
                   ? "standard_threshold"
-                  : (isInitialPopulation && passesEarly && confirmStreak >= 1)
-                    ? "initial_reveal_threshold"
-                    : "early_reveal_threshold",
+                  : "early_reveal_threshold",
             }
           : {}),
       },
@@ -1482,11 +1471,11 @@ export async function promoteCorrelationCandidates(db, payload) {
     processedCount += 1;
     if (onProgress && (processedCount === 1 || processedCount % 25 === 0 || processedCount === normalized.length)) {
       await onProgress({
-      processedCandidates: processedCount,
-      surfacedCount: newlySurfacedCount,
-      totalCandidates: normalized.length,
-    });
-}
+        processedCandidates: processedCount,
+        surfacedCount: newlySurfacedCount,
+        totalCandidates: normalized.length,
+      });
+    }
   }
 
   return { newlySurfacedCount, processedCount };
@@ -1593,6 +1582,247 @@ export async function runCorrelationEngineAndPromoteForUser(db, options) {
     });
     throw err;
   }
+}
+
+export async function getUserCorrelationProgress(db, { userId }) {
+  if (!db) throw new Error("DB not ready");
+
+  const userIdRaw = String(userId || "").trim();
+  if (!userIdRaw) throw new Error("Missing userId");
+
+  const userObjectId = new ObjectId(userIdRaw);
+
+  const packsCol = db.collection(COLLECTION);
+  const surfacedCol = db.collection(USER_CORRELATIONS_COLLECTION);
+  const totalsCol = db.collection("user_daily_totals");
+  const usersCol = db.collection("users");
+
+  const userDoc = await usersCol.findOne(
+    { _id: userObjectId },
+    {
+      projection: {
+        lastCorrelationRevealAt: 1,
+        lastCorrelationRevealDateKey: 1,
+      },
+    }
+  );
+
+  const lastRevealDateKey =
+    normalizeDateKey(userDoc?.lastCorrelationRevealDateKey) ||
+    deriveDateKeyFromDate(userDoc?.lastCorrelationRevealAt);
+
+  const dayCount = await totalsCol.countDocuments({ userId: userObjectId });
+
+  const cycleDayCount = lastRevealDateKey
+    ? await totalsCol.countDocuments({
+        userId: userObjectId,
+        dateKey: { $gt: lastRevealDateKey },
+      })
+    : dayCount;
+
+  const latestRoundup = await packsCol.findOne(
+    {
+      userId: userObjectId,
+      algorithmVersion: "daily_roundup_v1",
+    },
+    {
+      sort: { dateKey: -1 },
+      projection: {
+        candidates: 1,
+        dateKey: 1,
+        storedCount: 1,
+        updatedAt: 1,
+        createdAt: 1,
+      },
+    }
+  );
+
+  const latestEnginePack = await packsCol.findOne(
+    {
+      userId: userObjectId,
+      algorithmVersion: "correlation_engine_v1",
+    },
+    {
+      sort: { dateKey: -1 },
+      projection: {
+        candidates: 1,
+        dateKey: 1,
+        storedCount: 1,
+        updatedAt: 1,
+        createdAt: 1,
+      },
+    }
+  );
+
+  const surfacedCount = await surfacedCol.countDocuments({
+    userId: userObjectId,
+    isSurfaced: true,
+  });
+
+  const surfacedItems = await surfacedCol
+    .find(
+      { userId: userObjectId, isSurfaced: true },
+      { projection: { inputKey: 1 } }
+    )
+    .toArray();
+
+  const allTrackedCorrelationDocs = await surfacedCol
+    .find(
+      { userId: userObjectId },
+      {
+        projection: {
+          inputKey: 1,
+          isSurfaced: 1,
+          firstSeenDateKey: 1,
+          lastSeenDateKey: 1,
+          surfacedDateKey: 1,
+          confirmStreak: 1,
+          strength: 1,
+        },
+      }
+    )
+    .toArray();
+
+  const surfacedInputKeys = new Set(
+    surfacedItems
+      .map((d) => String(d?.inputKey || "").trim())
+      .filter(Boolean)
+  );
+
+  const engineCandidates = Array.isArray(latestEnginePack?.candidates)
+    ? latestEnginePack.candidates
+    : [];
+  const latestRoundupCandidates = Array.isArray(latestRoundup?.candidates)
+    ? latestRoundup.candidates
+    : [];
+
+  const trackedSignalKeys = new Set();
+  const strengtheningSignalKeys = new Set();
+  const trackedIngredientKeys = new Set();
+  const trackedNutrientKeys = new Set();
+
+  const cycleCandidateSignalKeys = new Set();
+  const cycleStrengtheningSignalKeys = new Set();
+  const cycleSurfacedSignalKeys = new Set();
+
+  for (const c of engineCandidates) {
+    const inputKey = String(c?.inputKey || "").trim();
+    const outputKey = String(c?.outputKey || "").trim();
+    const strength = Number(c?.strength);
+
+    if (!inputKey || !outputKey) continue;
+    if (!PROGRESS_TRACKED_OUTCOMES.has(outputKey)) continue;
+    if (!isTrackedSignalInputKey(inputKey)) continue;
+
+    trackedSignalKeys.add(inputKey);
+
+    if (inputKey.startsWith("ing:")) trackedIngredientKeys.add(inputKey);
+    else trackedNutrientKeys.add(inputKey);
+
+    if (
+      Number.isFinite(strength) &&
+      Math.abs(strength) >= 0.25 &&
+      !surfacedInputKeys.has(inputKey)
+    ) {
+      strengtheningSignalKeys.add(inputKey);
+    }
+  }
+
+  for (const d of allTrackedCorrelationDocs) {
+    const inputKey = String(d?.inputKey || "").trim();
+    if (!inputKey) continue;
+    if (!isTrackedSignalInputKey(inputKey)) continue;
+
+    const firstSeenDateKey = normalizeDateKey(d?.firstSeenDateKey);
+    const lastSeenDateKey = normalizeDateKey(d?.lastSeenDateKey);
+    const surfacedDateKey = normalizeDateKey(d?.surfacedDateKey);
+    const confirmStreak = Number.isFinite(Number(d?.confirmStreak)) ? Number(d.confirmStreak) : 0;
+    const strength = Number(d?.strength);
+    const isSurfaced = d?.isSurfaced === true;
+
+    const isInCurrentCycle = !lastRevealDateKey || (firstSeenDateKey && isDateKeyAfter(firstSeenDateKey, lastRevealDateKey));
+    if (!isInCurrentCycle) continue;
+
+    cycleCandidateSignalKeys.add(inputKey);
+
+    if (inputKey.startsWith("ing:")) {
+      // no-op here; ingredient long-term counts already come from latest engine pack
+    }
+
+    if (isSurfaced && surfacedDateKey && (!lastRevealDateKey || isDateKeyAfter(surfacedDateKey, lastRevealDateKey))) {
+      cycleSurfacedSignalKeys.add(inputKey);
+    }
+
+    if (!isSurfaced) {
+      const looksStrong = (Number.isFinite(strength) && Math.abs(strength) >= 0.25) || confirmStreak >= 1;
+      const seenThisCycle = !lastRevealDateKey || (lastSeenDateKey && isDateKeyAfter(lastSeenDateKey, lastRevealDateKey));
+      if (looksStrong && seenThisCycle) {
+        cycleStrengtheningSignalKeys.add(inputKey);
+      }
+    }
+  }
+
+  const effectiveCycleDaysLogged =
+    !lastRevealDateKey ? dayCount : cycleDayCount;
+
+  const effectiveCycleCandidateSignals =
+    !lastRevealDateKey ? trackedSignalKeys.size : cycleCandidateSignalKeys.size;
+
+  const effectiveCycleStrengtheningSignals =
+    !lastRevealDateKey ? strengtheningSignalKeys.size : cycleStrengtheningSignalKeys.size;
+
+  const effectiveCycleSurfacedSignals =
+    !lastRevealDateKey ? surfacedCount : cycleSurfacedSignalKeys.size;
+
+  const cycleProgress = computeCorrelationCycleProgress({
+    daysLogged: effectiveCycleDaysLogged,
+    candidateSignals: effectiveCycleCandidateSignals,
+    strengtheningSignals: effectiveCycleStrengtheningSignals,
+    surfacedSignals: effectiveCycleSurfacedSignals,
+  });
+
+  const longTermProgress = computeLongTermResearchProgress({
+    daysLogged: dayCount,
+    surfacedSignals: surfacedCount,
+    trackedSignalCount: trackedSignalKeys.size,
+    trackedIngredients: trackedIngredientKeys.size,
+  });
+
+  const roundupAttentionCount = latestRoundupCandidates.filter((c) => {
+    const bucket = String(c?.bucket || "").trim().toLowerCase();
+    return bucket === "low" || bucket === "over_safe" || bucket === "over_limit";
+  }).length;
+
+  return {
+    userId: userIdRaw,
+    daysLogged: effectiveCycleDaysLogged,
+    candidateSignals: effectiveCycleCandidateSignals,
+    strengtheningSignals: effectiveCycleStrengtheningSignals,
+    surfacedSignals: effectiveCycleSurfacedSignals,
+    totalDaysLogged: dayCount,
+    totalSurfacedSignals: surfacedCount,
+    lastRevealDateKey: lastRevealDateKey || null,
+    trackedIngredients: trackedIngredientKeys.size,
+    trackedNutrients: trackedNutrientKeys.size,
+    cycleProgress,
+    longTermProgress,
+    totalCandidateSignals: trackedSignalKeys.size,
+    estimatedFirstRevealReadiness: cycleProgress.overallCycleProgress,
+    earlyRevealAvailable: effectiveCycleStrengtheningSignals > 0,
+    latestRoundupDateKey: latestRoundup?.dateKey || null,
+    latestRoundupCandidateCount:
+      Number(latestRoundup?.storedCount) || latestRoundupCandidates.length || 0,
+    latestRoundupAttentionCount: roundupAttentionCount,
+    latestCorrelationDateKey: latestEnginePack?.dateKey || null,
+    latestCorrelationCandidateCount:
+      Number(latestEnginePack?.storedCount) || engineCandidates.length || 0,
+    updatedAt:
+      latestEnginePack?.updatedAt ||
+      latestEnginePack?.createdAt ||
+      latestRoundup?.updatedAt ||
+      latestRoundup?.createdAt ||
+      null,
+  };
 }
 
 // Fetch a single per-day analysis pack (e.g. daily_roundup_v1) for a user + dateKey.
