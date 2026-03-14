@@ -15,7 +15,8 @@ import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, delete
 import { getFoodDetails, attachUSDAEquivalentFoodIdToCandidates, attachUSDAEquivalentFoodIdToDoc, chooseBestCanadianDocForUPC,
   fetchBestDocForBarcode, makeBarcodeLockedCandidateFromDoc, applyIngredientMicronutrientEstimates } from "./services/foodDetails.js";
 import { getUserFavoritesByUserId, addUserFavoriteByUserId, deleteUserFavoriteByUserId,} from "./services/favorites.js";
-import { storeUserCorrelationPack, runCorrelationEngineAndPromoteForUser, fetchUserDayAnalysisPack, getUserCorrelationProgress, markCorrelationRevealForUser} from "./services/userAnalysis.js";
+import { storeUserCorrelationPack, runCorrelationEngineAndPromoteForUser, fetchUserDayAnalysisPack, getUserCorrelationProgress, 
+  markCorrelationRevealForUser, fetchUserCorrelationJobStatus } from "./services/userAnalysis.js";
 import { getAwardsForUser, applyAwardEvent } from "./services/awards.js";
 
 const app = express();
@@ -1691,6 +1692,25 @@ app.post("/users/:id/correlation-reveal", async (req, res) => {
 
 //------------------------------------------------------------------------------------------------------------------------------------
 
+app.get("/users/:id/correlation-job-status", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const out = await fetchUserCorrelationJobStatus(db, {
+      userId: req.params.id,
+    });
+
+    return res.json({ ok: true, item: out });
+  } catch (err) {
+    console.error("[CorrelationJobStatus] Error:", err);
+    return res.status(500).json({ ok: false, error: err?.message || "Failed to fetch correlation job status" });
+  }
+});
+
+//------------------------------------------------------------------------------------------------------------------------------------
+
 // GET /users/:id/correlations
 // Returns user-facing (surfaced) correlations from `user_correlations`.
 // Query params:
@@ -3096,3 +3116,4 @@ process.on("SIGTERM", async () => {
     process.exit(0);
   }
 });
+
