@@ -15,8 +15,9 @@ import { logUserMeal, recomputeDailyNutritionTotals, getUserMealsForDate, delete
 import { getFoodDetails, attachUSDAEquivalentFoodIdToCandidates, attachUSDAEquivalentFoodIdToDoc, chooseBestCanadianDocForUPC,
   fetchBestDocForBarcode, makeBarcodeLockedCandidateFromDoc, applyIngredientMicronutrientEstimates } from "./services/foodDetails.js";
 import { getUserFavoritesByUserId, addUserFavoriteByUserId, deleteUserFavoriteByUserId,} from "./services/favorites.js";
-import { storeUserCorrelationPack, runCorrelationEngineAndPromoteForUser, fetchUserDayAnalysisPack, getUserCorrelationProgress, 
-  markCorrelationRevealForUser, fetchUserCorrelationJobStatus } from "./services/userAnalysis.js";
+import { storeUserCorrelationPack, runCorrelationEngineAndPromoteForUser, fetchUserDayAnalysisPack, getUserCorrelationProgress,
+  markCorrelationRevealForUser, fetchUserCorrelationJobStatus, saveUserCorrelationRevealSnapshot,
+  fetchUserCorrelationRevealHistory } from "./services/userAnalysis.js";
 import { getAwardsForUser, applyAwardEvent } from "./services/awards.js";
 
 const app = express();
@@ -1706,6 +1707,72 @@ app.get("/users/:id/correlation-job-status", async (req, res) => {
   } catch (err) {
     console.error("[CorrelationJobStatus] Error:", err);
     return res.status(500).json({ ok: false, error: err?.message || "Failed to fetch correlation job status" });
+  }
+});
+
+//------------------------------------------------------------------------------------------------------------------------------------
+
+app.post("/users/:id/correlation-reveals", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const userId = String(req.params?.id || "").trim();
+    if (!userId || !ObjectId.isValid(userId)) {
+      return res.status(400).json({ ok: false, error: "Missing or invalid ':id' (userId)." });
+    }
+
+    const out = await saveUserCorrelationRevealSnapshot(db, {
+      userId,
+      dateKey: req.body?.dateKey,
+      surfacedCount: req.body?.surfacedCount,
+      totalCount: req.body?.totalCount,
+      summary: req.body?.summary,
+      correlations: Array.isArray(req.body?.correlations) ? req.body.correlations : [],
+      jobMeta: req.body?.jobMeta,
+    });
+
+    return res.json(out);
+  } catch (err) {
+    console.error("[CorrelationReveals/Save] Error:", err);
+    const status = err?.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err?.message || "Failed to save correlation reveal snapshot",
+    });
+  }
+});
+
+//------------------------------------------------------------------------------------------------------------------------------------
+
+app.get("/users/:id/correlation-reveals", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({ ok: false, error: "DB not ready" });
+    }
+
+    const userId = String(req.params?.id || "").trim();
+    if (!userId || !ObjectId.isValid(userId)) {
+      return res.status(400).json({ ok: false, error: "Missing or invalid ':id' (userId)." });
+    }
+
+    const limitRaw = req.query?.limit;
+    const limit = Number.isFinite(Number(limitRaw)) ? Number(limitRaw) : 20;
+
+    const items = await fetchUserCorrelationRevealHistory(db, {
+      userId,
+      limit,
+    });
+
+    return res.json({ ok: true, items });
+  } catch (err) {
+    console.error("[CorrelationReveals/List] Error:", err);
+    const status = err?.statusCode || 500;
+    return res.status(status).json({
+      ok: false,
+      error: err?.message || "Failed to fetch correlation reveal history",
+    });
   }
 });
 
