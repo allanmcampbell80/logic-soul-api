@@ -1139,6 +1139,8 @@ export async function runCorrelationEngineForUser(db, options) {
 
 const USER_CORRELATIONS_COLLECTION = "user_correlations";
 
+const USER_CORRELATION_JOBS_COLLECTION = "user_analysis_jobs";
+
 const PROGRESS_TRACKED_OUTCOMES = new Set([
   "checkin_mood",
   "checkin_clarity_score",
@@ -1271,8 +1273,84 @@ function buildCorrelationKey(c, lagDaysFallback = 1) {
   return { inputKey, outputKey, mode, lagDays };
 }
 
+async function upsertCorrelationJobStatus(db, { userId, patch }) {
+  if (!db || !userId || !patch || typeof patch !== "object") return;
+
+  const jobsCol = db.collection(USER_CORRELATION_JOBS_COLLECTION);
+  const now = new Date();
+
+  await jobsCol.updateOne(
+    { userId },
+    {
+      $set: {
+        ...patch,
+        updatedAt: now,
+      },
+      $setOnInsert: {
+        userId,
+        createdAt: now,
+      },
+    },
+    { upsert: true }
+  );
+}
+
+async function markCorrelationJobFailed(db, { userId, error }) {
+  await upsertCorrelationJobStatus(db, {
+    userId,
+    patch: {
+      status: "failed",
+      phase: "failed",
+      error: String(error || "Correlation run failed"),
+      isRunning: false,
+      completedAt: new Date(),
+    },
+  });
+}
+
+export async function fetchUserCorrelationJobStatus(db, { userId }) {
+  if (!db) throw new Error("DB not ready");
+
+  const userIdRaw = String(userId || "").trim();
+  if (!userIdRaw) throw new Error("Missing userId");
+
+  const userObjectId = new ObjectId(userIdRaw);
+  const jobsCol = db.collection(USER_CORRELATION_JOBS_COLLECTION);
+
+  const doc = await jobsCol.findOne({ userId: userObjectId });
+  if (!doc) {
+    return {
+      userId: userIdRaw,
+      status: "idle",
+      phase: "idle",
+      isRunning: false,
+      totalCandidates: 0,
+      processedCandidates: 0,
+      surfacedCount: 0,
+      updatedAt: null,
+      completedAt: null,
+      error: null,
+    };
+  }
+
+  return {
+    userId: userIdRaw,
+    status: typeof doc.status === "string" ? doc.status : "idle",
+    phase: typeof doc.phase === "string" ? doc.phase : "idle",
+    isRunning: doc.isRunning === true,
+    totalCandidates: Number.isFinite(Number(doc.totalCandidates)) ? Number(doc.totalCandidates) : 0,
+    processedCandidates: Number.isFinite(Number(doc.processedCandidates)) ? Number(doc.processedCandidates) : 0,
+    surfacedCount: Number.isFinite(Number(doc.surfacedCount)) ? Number(doc.surfacedCount) : 0,
+    startedAt: doc.startedAt || null,
+    updatedAt: doc.updatedAt || null,
+    completedAt: doc.completedAt || null,
+    error: doc.error || null,
+  };
+}
+
 export async function promoteCorrelationCandidates(db, payload) {
   const { userId, dateKey, candidates, lagDays } = payload || {};
+  const onProgress = typeof payload?.onProgress === "function" ? payload.onProgress : null;
 
   if (!userId || typeof userId !== "string") {
     throw new Error("userId is required");
@@ -1296,9 +1374,18 @@ export async function promoteCorrelationCandidates(db, payload) {
   const col = db.collection(USER_CORRELATIONS_COLLECTION);
   const now = new Date();
 
+  // If this user has no tracked correlations yet, allow a first-reveal surfacing path
+  // so the first intentional reveal is not empty.
+  const existingForUser = await col.findOne(
+    { userId: userObjectId },
+    { projection: { _id: 1 } }
+  );
+  const isInitialPopulation = !existingForUser;
+
   // Only consider candidates that pass minimal schema sanity.
   const normalized = candidates.map((c) => normalizeCandidate(c)).filter(Boolean);
 
+  let processedCount = 0;
   let newlySurfacedCount = 0;
 
   for (const c of normalized) {
@@ -1365,7 +1452,8 @@ export async function promoteCorrelationCandidates(db, payload) {
 
     const shouldSurface = !isSurfacedPrev && (
       (seenCount >= 5 && confirmStreak >= 2) ||
-      (passesEarly && seenCount >= 2 && confirmStreak >= 1)
+      (passesEarly && seenCount >= 2 && confirmStreak >= 1) ||
+      (isInitialPopulation && passesEarly && confirmStreak >= 1)
     );
 
     const patch = {
@@ -1379,7 +1467,9 @@ export async function promoteCorrelationCandidates(db, payload) {
               surfacedReason:
                 seenCount >= 5 && confirmStreak >= 2
                   ? "standard_threshold"
-                  : "early_reveal_threshold",
+                  : (isInitialPopulation && passesEarly && confirmStreak >= 1)
+                    ? "initial_reveal_threshold"
+                    : "early_reveal_threshold",
             }
           : {}),
       },
@@ -1388,272 +1478,121 @@ export async function promoteCorrelationCandidates(db, payload) {
     await col.updateOne(keyFilter, patch);
 
     if (shouldSurface) newlySurfacedCount += 1;
+
+    processedCount += 1;
+    if (onProgress && (processedCount === 1 || processedCount % 25 === 0 || processedCount === normalized.length)) {
+      await onProgress({
+      processedCandidates: processedCount,
+      surfacedCount: newlySurfacedCount,
+      totalCandidates: normalized.length,
+    });
+}
   }
 
-  return { newlySurfacedCount, processedCount: normalized.length };
+  return { newlySurfacedCount, processedCount };
 }
 
 // Convenience wrapper: run the engine and immediately promote candidates.
 export async function runCorrelationEngineAndPromoteForUser(db, options) {
-  const result = await runCorrelationEngineForUser(db, options);
-
-  // If there are no candidates (or not enough days), nothing to promote.
-  const candidates = Array.isArray(result?.promotionCandidates)
-    ? result.promotionCandidates
-    : (Array.isArray(result?.top) ? result.top : []);
-  if (candidates.length === 0) {
-    return { ...result, promotedCount: 0 };
-  }
-
-  const promoted = await promoteCorrelationCandidates(db, {
-    userId: String(options?.userId || "").trim(),
-    dateKey: result?.dateKey || null,
-    candidates,
-    lagDays: result?.lagDays,
-  });
-
-  return { ...result, promotedCount: promoted?.newlySurfacedCount ?? 0 };
-}
-
-export async function getUserCorrelationProgress(db, { userId }) {
-  if (!db) throw new Error("DB not ready");
-
-  const userIdRaw = String(userId || "").trim();
+  const userIdRaw = String(options?.userId || "").trim();
   if (!userIdRaw) throw new Error("Missing userId");
 
   const userObjectId = new ObjectId(userIdRaw);
+  const startedAt = new Date();
 
-  const packsCol = db.collection(COLLECTION);
-  const surfacedCol = db.collection(USER_CORRELATIONS_COLLECTION);
-  const totalsCol = db.collection("user_daily_totals");
-  const usersCol = db.collection("users");
-
-  const userDoc = await usersCol.findOne(
-    { _id: userObjectId },
-    {
-      projection: {
-        lastCorrelationRevealAt: 1,
-        lastCorrelationRevealDateKey: 1,
-      },
-    }
-  );
-
-  const lastRevealDateKey =
-    normalizeDateKey(userDoc?.lastCorrelationRevealDateKey) ||
-    deriveDateKeyFromDate(userDoc?.lastCorrelationRevealAt);
-
-  const dayCount = await totalsCol.countDocuments({ userId: userObjectId });
-
-  const cycleDayCount = lastRevealDateKey
-    ? await totalsCol.countDocuments({
-        userId: userObjectId,
-        dateKey: { $gt: lastRevealDateKey },
-      })
-    : dayCount;
-
-  const latestRoundup = await packsCol.findOne(
-    {
-      userId: userObjectId,
-      algorithmVersion: "daily_roundup_v1",
-    },
-    {
-      sort: { dateKey: -1 },
-      projection: {
-        candidates: 1,
-        dateKey: 1,
-        storedCount: 1,
-        updatedAt: 1,
-        createdAt: 1,
-      },
-    }
-  );
-
-  const latestEnginePack = await packsCol.findOne(
-    {
-      userId: userObjectId,
-      algorithmVersion: "correlation_engine_v1",
-    },
-    {
-      sort: { dateKey: -1 },
-      projection: {
-        candidates: 1,
-        dateKey: 1,
-        storedCount: 1,
-        updatedAt: 1,
-        createdAt: 1,
-      },
-    }
-  );
-
-  const surfacedCount = await surfacedCol.countDocuments({
+  await upsertCorrelationJobStatus(db, {
     userId: userObjectId,
-    isSurfaced: true,
+    patch: {
+      status: "running",
+      phase: "building_candidates",
+      isRunning: true,
+      startedAt,
+      completedAt: null,
+      error: null,
+      totalCandidates: 0,
+      processedCandidates: 0,
+      surfacedCount: 0,
+    },
   });
 
-  const surfacedItems = await surfacedCol
-    .find(
-      { userId: userObjectId, isSurfaced: true },
-      { projection: { inputKey: 1 } }
-    )
-    .toArray();
+  try {
+    const result = await runCorrelationEngineForUser(db, options);
 
-  const allTrackedCorrelationDocs = await surfacedCol
-    .find(
-      { userId: userObjectId },
-      {
-        projection: {
-          inputKey: 1,
-          isSurfaced: 1,
-          firstSeenDateKey: 1,
-          lastSeenDateKey: 1,
-          surfacedDateKey: 1,
-          confirmStreak: 1,
-          strength: 1,
+    const candidates = Array.isArray(result?.promotionCandidates)
+      ? result.promotionCandidates
+      : (Array.isArray(result?.top) ? result.top : []);
+
+    const totalCandidates = candidates.length;
+
+    await upsertCorrelationJobStatus(db, {
+      userId: userObjectId,
+      patch: {
+        status: "running",
+        phase: "promoting",
+        isRunning: true,
+        totalCandidates,
+        processedCandidates: 0,
+        surfacedCount: 0,
+      },
+    });
+
+    if (totalCandidates === 0) {
+      await upsertCorrelationJobStatus(db, {
+        userId: userObjectId,
+        patch: {
+          status: "complete",
+          phase: "complete",
+          isRunning: false,
+          totalCandidates: 0,
+          processedCandidates: 0,
+          surfacedCount: 0,
+          completedAt: new Date(),
         },
-      }
-    )
-    .toArray();
-
-  const surfacedInputKeys = new Set(
-    surfacedItems
-      .map((d) => String(d?.inputKey || "").trim())
-      .filter(Boolean)
-  );
-
-  const engineCandidates = Array.isArray(latestEnginePack?.candidates)
-    ? latestEnginePack.candidates
-    : [];
-  const latestRoundupCandidates = Array.isArray(latestRoundup?.candidates)
-    ? latestRoundup.candidates
-    : [];
-
-  const trackedSignalKeys = new Set();
-  const strengtheningSignalKeys = new Set();
-  const trackedIngredientKeys = new Set();
-  const trackedNutrientKeys = new Set();
-
-  const cycleCandidateSignalKeys = new Set();
-  const cycleStrengtheningSignalKeys = new Set();
-  const cycleSurfacedSignalKeys = new Set();
-
-  for (const c of engineCandidates) {
-    const inputKey = String(c?.inputKey || "").trim();
-    const outputKey = String(c?.outputKey || "").trim();
-    const strength = Number(c?.strength);
-
-    if (!inputKey || !outputKey) continue;
-    if (!PROGRESS_TRACKED_OUTCOMES.has(outputKey)) continue;
-    if (!isTrackedSignalInputKey(inputKey)) continue;
-
-    trackedSignalKeys.add(inputKey);
-
-    if (inputKey.startsWith("ing:")) trackedIngredientKeys.add(inputKey);
-    else trackedNutrientKeys.add(inputKey);
-
-    if (
-      Number.isFinite(strength) &&
-      Math.abs(strength) >= 0.25 &&
-      !surfacedInputKeys.has(inputKey)
-    ) {
-      strengtheningSignalKeys.add(inputKey);
+      });
+      return { ...result, promotedCount: 0 };
     }
+
+    const promoted = await promoteCorrelationCandidates(db, {
+      userId: userIdRaw,
+      dateKey: result?.dateKey || null,
+      candidates,
+      lagDays: result?.lagDays,
+      onProgress: async ({ processedCandidates, surfacedCount, totalCandidates }) => {
+        await upsertCorrelationJobStatus(db, {
+          userId: userObjectId,
+          patch: {
+            status: "running",
+            phase: "promoting",
+            isRunning: true,
+            totalCandidates,
+            processedCandidates,
+            surfacedCount,
+          },
+        });
+      },
+    });
+
+    await upsertCorrelationJobStatus(db, {
+      userId: userObjectId,
+      patch: {
+        status: "complete",
+        phase: "complete",
+        isRunning: false,
+        totalCandidates,
+        processedCandidates: promoted?.processedCount ?? totalCandidates,
+        surfacedCount: promoted?.newlySurfacedCount ?? 0,
+        completedAt: new Date(),
+      },
+    });
+
+    return { ...result, promotedCount: promoted?.newlySurfacedCount ?? 0 };
+  } catch (err) {
+    await markCorrelationJobFailed(db, {
+      userId: userObjectId,
+      error: err?.message || err,
+    });
+    throw err;
   }
-
-  for (const d of allTrackedCorrelationDocs) {
-    const inputKey = String(d?.inputKey || "").trim();
-    if (!inputKey) continue;
-    if (!isTrackedSignalInputKey(inputKey)) continue;
-
-    const firstSeenDateKey = normalizeDateKey(d?.firstSeenDateKey);
-    const lastSeenDateKey = normalizeDateKey(d?.lastSeenDateKey);
-    const surfacedDateKey = normalizeDateKey(d?.surfacedDateKey);
-    const confirmStreak = Number.isFinite(Number(d?.confirmStreak)) ? Number(d.confirmStreak) : 0;
-    const strength = Number(d?.strength);
-    const isSurfaced = d?.isSurfaced === true;
-
-    const isInCurrentCycle = !lastRevealDateKey || (firstSeenDateKey && isDateKeyAfter(firstSeenDateKey, lastRevealDateKey));
-    if (!isInCurrentCycle) continue;
-
-    cycleCandidateSignalKeys.add(inputKey);
-
-    if (inputKey.startsWith("ing:")) {
-      // no-op here; ingredient long-term counts already come from latest engine pack
-    }
-
-    if (isSurfaced && surfacedDateKey && (!lastRevealDateKey || isDateKeyAfter(surfacedDateKey, lastRevealDateKey))) {
-      cycleSurfacedSignalKeys.add(inputKey);
-    }
-
-    if (!isSurfaced) {
-      const looksStrong = (Number.isFinite(strength) && Math.abs(strength) >= 0.25) || confirmStreak >= 1;
-      const seenThisCycle = !lastRevealDateKey || (lastSeenDateKey && isDateKeyAfter(lastSeenDateKey, lastRevealDateKey));
-      if (looksStrong && seenThisCycle) {
-        cycleStrengtheningSignalKeys.add(inputKey);
-      }
-    }
-  }
-
-  const effectiveCycleDaysLogged =
-    !lastRevealDateKey ? dayCount : cycleDayCount;
-
-  const effectiveCycleCandidateSignals =
-    !lastRevealDateKey ? trackedSignalKeys.size : cycleCandidateSignalKeys.size;
-
-  const effectiveCycleStrengtheningSignals =
-    !lastRevealDateKey ? strengtheningSignalKeys.size : cycleStrengtheningSignalKeys.size;
-
-  const effectiveCycleSurfacedSignals =
-    !lastRevealDateKey ? surfacedCount : cycleSurfacedSignalKeys.size;
-
-  const cycleProgress = computeCorrelationCycleProgress({
-    daysLogged: effectiveCycleDaysLogged,
-    candidateSignals: effectiveCycleCandidateSignals,
-    strengtheningSignals: effectiveCycleStrengtheningSignals,
-    surfacedSignals: effectiveCycleSurfacedSignals,
-  });
-
-  const longTermProgress = computeLongTermResearchProgress({
-    daysLogged: dayCount,
-    surfacedSignals: surfacedCount,
-    trackedSignalCount: trackedSignalKeys.size,
-    trackedIngredients: trackedIngredientKeys.size,
-  });
-
-  const roundupAttentionCount = latestRoundupCandidates.filter((c) => {
-    const bucket = String(c?.bucket || "").trim().toLowerCase();
-    return bucket === "low" || bucket === "over_safe" || bucket === "over_limit";
-  }).length;
-
-  return {
-    userId: userIdRaw,
-    daysLogged: effectiveCycleDaysLogged,
-    candidateSignals: effectiveCycleCandidateSignals,
-    strengtheningSignals: effectiveCycleStrengtheningSignals,
-    surfacedSignals: effectiveCycleSurfacedSignals,
-    totalDaysLogged: dayCount,
-    totalSurfacedSignals: surfacedCount,
-    lastRevealDateKey: lastRevealDateKey || null,
-    trackedIngredients: trackedIngredientKeys.size,
-    trackedNutrients: trackedNutrientKeys.size,
-    cycleProgress,
-    longTermProgress,
-    totalCandidateSignals: trackedSignalKeys.size,
-    estimatedFirstRevealReadiness: cycleProgress.overallCycleProgress,
-    earlyRevealAvailable: effectiveCycleStrengtheningSignals > 0,
-    latestRoundupDateKey: latestRoundup?.dateKey || null,
-    latestRoundupCandidateCount:
-      Number(latestRoundup?.storedCount) || latestRoundupCandidates.length || 0,
-    latestRoundupAttentionCount: roundupAttentionCount,
-    latestCorrelationDateKey: latestEnginePack?.dateKey || null,
-    latestCorrelationCandidateCount:
-      Number(latestEnginePack?.storedCount) || engineCandidates.length || 0,
-    updatedAt:
-      latestEnginePack?.updatedAt ||
-      latestEnginePack?.createdAt ||
-      latestRoundup?.updatedAt ||
-      latestRoundup?.createdAt ||
-      null,
-  };
 }
 
 // Fetch a single per-day analysis pack (e.g. daily_roundup_v1) for a user + dateKey.
