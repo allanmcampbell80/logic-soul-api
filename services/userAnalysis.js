@@ -291,7 +291,9 @@ function isOutcomeKey(k) {
 
 function isInputKey(k) {
   if (!k || typeof k !== "string") return false;
-  if (isOutcomeKey(k)) return false;
+  const key = String(k).trim().toLowerCase();
+  if (EXCLUDED_CORRELATION_INPUT_KEYS.has(key)) return false;
+  if (isOutcomeKey(key)) return false;
   return true;
 }
 
@@ -1149,9 +1151,15 @@ const PROGRESS_TRACKED_OUTCOMES = new Set([
   "checkin_energy",
 ]);
 
+const EXCLUDED_CORRELATION_INPUT_KEYS = new Set([
+  "weather_lat_r3",
+  "weather_lon_r3",
+]);
+
 function isTrackedSignalInputKey(key) {
   const k = String(key || "").trim().toLowerCase();
   if (!k) return false;
+  if (EXCLUDED_CORRELATION_INPUT_KEYS.has(k)) return false;
   if (k.startsWith("ing:")) return true;
   if (k.startsWith("macro:")) return false;
   return true;
