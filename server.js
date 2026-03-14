@@ -1381,34 +1381,6 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
 
     const result = await patchUserDailyTotals(db, userId, dateKeyResolved, patchObj, tzCheckin);
 
-    // User Analysis: after each check-in update, run correlation engine + promotion.
-    // We *try* to await it so the client can light up UI hints immediately.
-    // If it fails, we fall back to a null summary (never fail the check-in).
-    let correlationSummary = null;
-    try {
-      if (db && result?.ok) {
-        const ua = await runCorrelationEngineAndPromoteForUser(db, {
-          userId: String(userId),
-          windowDays: 120,
-          lagDays: 1,
-          minSupportDays: 4,
-          topK: 150,
-        });
-
-        const promotedCount = typeof ua?.promotedCount === "number" ? ua.promotedCount : 0;
-        const storedCount = typeof ua?.storedCount === "number" ? ua.storedCount : 0;
-
-        correlationSummary = {
-          storedCount,
-          promotedCount,
-          hasNewInsights: promotedCount > 0,
-        };
-      }
-    } catch (uaErr) {
-      console.error("[UserAnalysis/AutoRunAfterCheckIn] Failed (best-effort):", uaErr);
-      correlationSummary = null;
-    }
-
     // Energy: whenever we patch a check-in, also snapshot the running energy average for that date.
     // Best-effort: do not fail the check-in if snapshotting fails.
     try {
@@ -1467,10 +1439,7 @@ app.patch("/users/:id/daily-totals/checkin", async (req, res) => {
       console.error("[Users/DailyTotals/CheckIn] Daily check-in award hook error:", awardErr);
     }
 
-    return res.json({
-      ...result,
-      correlationSummary,
-    });
+    return res.json(result);
   } catch (err) {
     console.error("[Users/DailyTotals/CheckIn] Error:", err);
     const status = err.statusCode || 500;
